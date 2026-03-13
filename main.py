@@ -1,0 +1,368 @@
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.utils import get_openapi
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+from typing import Optional
+import jwt
+import httpx
+import os
+from dotenv import load_dotenv
+import logging
+import json
+from functools import lru_cache
+import time
+
+# Carregar variáveis de ambiente
+load_dotenv()
+
+# ============================================
+# CONFIGURAÇÃO DE LOGGING
+# ============================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/api.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ============================================
+# VARIÁVEIS DE AMBIENTE
+# ============================================
+CLIENT_ID = os.getenv("CLIENT_ID", "ibama_client")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "sua_secret_key_aqui")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "sua_jwt_secret_aqui")
+SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://trident-energy-br.spinergie.com/")
+SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "spin_SFpOxC8tCHhw8gI40HsMTX4dpWicwIsV0R96l_eyJjdGltZSI6IjIwMjYtMDItMTMgMTQ6NTI6MTMiLCJ1cmwiOiJ0cmlkZW50LWVuZXJneS1ici5zcGluZXJnaWUuY29tIiwidWlkIjo0MDR9")
+
+# ============================================
+# CONFIGURAÇÃO DA API FastAPI
+# ============================================
+app = FastAPI(
+    title="API Unidades Marítimas IBAMA",
+    description="API para localização de unidades marítimas integrada com Spinergie",
+    version="1.0.0"
+)
+
+# ============================================
+# SCHEMAS (Modelos de Dados)
+# ============================================
+
+class TokenRequest(BaseModel):
+    """Modelo para requisição de token"""
+    grant_type: str = "client_credentials"
+    client_id: str
+    client_secret: str
+
+class TokenResponse(BaseModel):
+    """Modelo para resposta de token"""
+    access_token: str
+    token_type: str
+    expires_in: int
+
+class UnidadeMaritima(BaseModel):
+    """Modelo para Unidade Marítima"""
+    nome: str
+    imo: str
+    mmsi: str
+    tipoUnidade: str
+    licencasAutorizadas: list
+    disponibilidadeInicio: str
+    disponibilidadeFim: str
+
+class PosicaoAIS(BaseModel):
+    """Modelo para Posição AIS"""
+    mmsi: str
+    latitude: float
+    longitude: float
+    timestampAquisicao: str
+
+class HealthResponse(BaseModel):
+    """Modelo para Health Check"""
+    status: str
+    timestamp: str
+    version: str
+
+# ============================================
+# SEGURANÇA E AUTENTICAÇÃO
+# ============================================
+
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/auth/token",
+    auto_error=False
+)
+
+http_bearer = HTTPBearer(auto_error=False)
+
+def criar_token_jwt(client_id: str, expires_in: int = 3600) -> str:
+    """Cria um token JWT válido"""
+    payload = {
+        "sub": client_id,
+        "exp": datetime.utcnow() + timedelta(seconds=expires_in),
+        "iat": datetime.utcnow()
+    }
+    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm="HS256")
+    logger.info(f"Token criado para cliente: {client_id}")
+    return token
+
+def verificar_token_jwt(token: str) -> dict:
+    """Verifica e valida um token JWT"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+        logger.info(f"Token válido para: {payload.get('sub')}")
+        return payload
+    except jwt.ExpiredSignatureError:
+        logger.warning("Token expirado")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expirado"
+        )
+    except jwt.InvalidTokenError:
+        logger.warning("Token inválido")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido"
+        )
+
+async def get_current_user(
+    token: Optional[str] = Depends(oauth2_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer)
+) -> str:
+    """Obtém o usuário atual baseado no token"""
+    
+    # Tenta obter token de diferentes formas
+    if credentials:
+        token = credentials.credentials
+    
+    if not token:
+        logger.warning("Token não fornecido")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token não fornecido"
+        )
+    
+    # Verifica o token
+    payload = verificar_token_jwt(token)
+    return payload.get("sub")
+
+# ============================================
+# ENDPOINTS
+# ============================================
+
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
+async def health_check():
+    """
+    Health Check - Verifica se a API está funcionando
+    
+    Retorna:
+    - status: "ok" se tudo está funcionando
+    - timestamp: data/hora atual
+    - version: versão da API
+    """
+    logger.info("Health check realizado")
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0.0"
+    }
+
+@app.post("/auth/token", response_model=TokenResponse, tags=["Autenticação"])
+async def obter_token(request: TokenRequest):
+    """
+    Obtém um token JWT para autenticação
+    
+    Requisição:
+    - client_id: ID do cliente (ibama_client)
+    - client_secret: Senha do cliente
+    - grant_type: Sempre "client_credentials"
+    
+    Retorna:
+    - access_token: Token JWT para usar nos endpoints protegidos
+    - token_type: "Bearer"
+    - expires_in: Segundos até expiração (3600 = 1 hora)
+    """
+    
+    # Valida as credenciais
+    if request.client_id != CLIENT_ID or request.client_secret != CLIENT_SECRET:
+        logger.warning(f"Tentativa de autenticação falha com client_id: {request.client_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciais inválidas"
+        )
+    
+    # Cria o token
+    expires_in = 3600
+    token = criar_token_jwt(request.client_id, expires_in)
+    
+    logger.info(f"Token gerado com sucesso para: {request.client_id}")
+    
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": expires_in
+    }
+
+@app.get("/v1/unidades", response_model=list[UnidadeMaritima], tags=["Unidades Marítimas"])
+async def listar_unidades(current_user: str = Depends(get_current_user)):
+    """
+    Lista todas as unidades marítimas
+    
+    Requer autenticação via token JWT
+    
+    Retorna:
+    - Lista de unidades marítimas com seus dados
+    """
+    
+    logger.info(f"Listando unidades marítimas para usuário: {current_user}")
+    
+    # Dados de exemplo (substitua com dados reais do Spinergie)
+    unidades = [
+        {
+            "nome": "Plataforma P-01",
+            "imo": "1234567",
+            "mmsi": "123456789",
+            "tipoUnidade": "Plataforma de Produção",
+            "licencasAutorizadas": ["ANP-2024-001", "IBAMA-2024-002"],
+            "disponibilidadeInicio": "2024-01-01T00:00:00Z",
+            "disponibilidadeFim": "2026-12-31T23:59:59Z"
+        },
+        {
+            "nome": "Navio de Suporte N-02",
+            "imo": "9876543",
+            "mmsi": "987654321",
+            "tipoUnidade": "Navio de Apoio",
+            "licencasAutorizadas": ["ANP-2024-003"],
+            "disponibilidadeInicio": "2024-06-01T00:00:00Z",
+            "disponibilidadeFim": "2026-12-31T23:59:59Z"
+        }
+    ]
+    
+    logger.info(f"Retornando {len(unidades)} unidades marítimas")
+    return unidades
+
+@app.get("/v1/posicao/{mmsi}", response_model=PosicaoAIS, tags=["Posição AIS"])
+async def obter_posicao(mmsi: str, current_user: str = Depends(get_current_user)):
+    """
+    Obtém a posição geográfica de uma unidade marítima
+    
+    Parâmetros:
+    - mmsi: Identificador MMSI da unidade (ex: 123456789)
+    
+    Requer autenticação via token JWT
+    
+    Retorna:
+    - mmsi: Identificador da unidade
+    - latitude: Latitude em graus decimais
+    - longitude: Longitude em graus decimais
+    - timestampAquisicao: Data/hora da última posição
+    """
+    
+    logger.info(f"Buscando posição para MMSI: {mmsi} (usuário: {current_user})")
+    
+    # Dados de exemplo (substitua com dados reais do Spinergie)
+    posicoes = {
+        "123456789": {
+            "mmsi": "123456789",
+            "latitude": -22.9068,
+            "longitude": -42.0281,
+            "timestampAquisicao": datetime.utcnow().isoformat()
+        },
+        "987654321": {
+            "mmsi": "987654321",
+            "latitude": -23.5505,
+            "longitude": -46.6333,
+            "timestampAquisicao": datetime.utcnow().isoformat()
+        }
+    }
+    
+    if mmsi not in posicoes:
+        logger.warning(f"MMSI não encontrado: {mmsi}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unidade com MMSI {mmsi} não encontrada"
+        )
+    
+    logger.info(f"Posição encontrada para MMSI: {mmsi}")
+    return posicoes[mmsi]
+
+@app.get("/v1/posicao", tags=["Posição AIS"])
+async def obter_posicoes_todas(current_user: str = Depends(get_current_user)):
+    """
+    Obtém as posições de TODAS as unidades marítimas
+    
+    Requer autenticação via token JWT
+    
+    Retorna:
+    - Lista com posições de todas as unidades
+    """
+    
+    logger.info(f"Buscando todas as posições (usuário: {current_user})")
+    
+    # Dados de exemplo
+    posicoes = [
+        {
+            "mmsi": "123456789",
+            "latitude": -22.9068,
+            "longitude": -42.0281,
+            "timestampAquisicao": datetime.utcnow().isoformat()
+        },
+        {
+            "mmsi": "987654321",
+            "latitude": -23.5505,
+            "longitude": -46.6333,
+            "timestampAquisicao": datetime.utcnow().isoformat()
+        }
+    ]
+    
+    logger.info(f"Retornando posições de {len(posicoes)} unidades")
+    return posicoes
+
+# ============================================
+# DOCUMENTAÇÃO AUTOMÁTICA (OpenAPI)
+# ============================================
+
+def custom_openapi():
+    """Customiza a documentação OpenAPI"""
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title="API Unidades Marítimas IBAMA",
+        version="1.0.0",
+        description="API para localização e monitoramento de unidades marítimas integrada com Spinergie",
+        routes=app.routes,
+    )
+    
+    openapi_schema["info"]["x-logo"] = {
+        "url": "https://www.ibama.gov.br/imagens/logo.png"
+    }
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+# ============================================
+# EXECUÇÃO
+# ============================================
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Criar pasta de logs se não existir
+    os.makedirs("logs", exist_ok=True)
+    
+    logger.info("Iniciando API IBAMA...")
+    logger.info(f"CLIENT_ID: {CLIENT_ID}")
+    logger.info(f"SPINERGIE_BASE_URL: {SPINERGIE_BASE_URL}")
+    
+    # Iniciar servidor Uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )
