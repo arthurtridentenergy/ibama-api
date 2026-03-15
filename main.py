@@ -5,13 +5,9 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Optional, List
 import jwt
-import httpx
 import os
 from dotenv import load_dotenv
 import logging
-import json
-from functools import lru_cache
-import time
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -35,8 +31,6 @@ logger = logging.getLogger(__name__)
 CLIENT_ID = os.getenv("CLIENT_ID", "ibama_client")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "sua_secret_key_aqui")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "sua_jwt_secret_aqui")
-SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://trident-energy-br.spinergie.com/")
-SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "spin_SFpOxC8tCHhw8gI40HsMTX4dpWicwIsV0R96l_eyJjdGltZSI6IjIwMjYtMDItMTMgMTQ6NTI6MTMiLCJ1cmwiOiJ0cmlkZW50LWVuZXJneS1ici5zcGluZXJnaWUuY29tIiwidWlkIjo0MDR9")
 
 # ============================================
 # CONFIGURAÇÃO DA API FastAPI
@@ -52,19 +46,16 @@ app = FastAPI(
 # ============================================
 
 class TokenRequest(BaseModel):
-    """Modelo para requisição de token"""
     grant_type: str = "client_credentials"
     client_id: str
     client_secret: str
 
 class TokenResponse(BaseModel):
-    """Modelo para resposta de token"""
     access_token: str
     token_type: str
     expires_in: int
 
 class UnidadeMaritima(BaseModel):
-    """Modelo para Unidade Marítima"""
     nome: str
     imo: str
     mmsi: str
@@ -74,14 +65,12 @@ class UnidadeMaritima(BaseModel):
     disponibilidadeFim: str
 
 class PosicaoAIS(BaseModel):
-    """Modelo para Posição AIS"""
     mmsi: str
     latitude: float
     longitude: float
     timestampAquisicao: str
 
 class HealthResponse(BaseModel):
-    """Modelo para Health Check"""
     status: str
     timestamp: str
     version: str
@@ -98,7 +87,6 @@ oauth2_scheme = OAuth2PasswordBearer(
 http_bearer = HTTPBearer(auto_error=False)
 
 def criar_token_jwt(client_id: str, expires_in: int = 3600) -> str:
-    """Cria um token JWT válido"""
     payload = {
         "sub": client_id,
         "exp": datetime.utcnow() + timedelta(seconds=expires_in),
@@ -109,7 +97,6 @@ def criar_token_jwt(client_id: str, expires_in: int = 3600) -> str:
     return token
 
 def verificar_token_jwt(token: str) -> dict:
-    """Verifica e valida um token JWT"""
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
         logger.info(f"Token válido para: {payload.get('sub')}")
@@ -131,8 +118,6 @@ async def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer)
 ) -> str:
-    """Obtém o usuário atual baseado no token"""
-    
     if credentials:
         token = credentials.credentials
     
@@ -152,9 +137,6 @@ async def get_current_user(
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
-    """
-    Health Check - Verifica se a API está funcionando
-    """
     logger.info("Health check realizado")
     return {
         "status": "ok",
@@ -164,10 +146,6 @@ async def health_check():
 
 @app.post("/auth/token", response_model=TokenResponse, tags=["Autenticação"])
 async def obter_token(request: TokenRequest):
-    """
-    Obtém um token JWT para autenticação
-    """
-    
     if request.client_id != CLIENT_ID or request.client_secret != CLIENT_SECRET:
         logger.warning(f"Tentativa de autenticação falha com client_id: {request.client_id}")
         raise HTTPException(
@@ -188,10 +166,6 @@ async def obter_token(request: TokenRequest):
 
 @app.get("/v1/unidades", response_model=List[UnidadeMaritima], tags=["Unidades Marítimas"])
 async def listar_unidades(current_user: str = Depends(get_current_user)):
-    """
-    Lista todas as unidades marítimas
-    """
-    
     logger.info(f"Listando unidades marítimas para usuário: {current_user}")
     
     unidades = [
@@ -220,10 +194,6 @@ async def listar_unidades(current_user: str = Depends(get_current_user)):
 
 @app.get("/v1/posicao/{mmsi}", response_model=PosicaoAIS, tags=["Posição AIS"])
 async def obter_posicao(mmsi: str, current_user: str = Depends(get_current_user)):
-    """
-    Obtém a posição geográfica de uma unidade marítima
-    """
-    
     logger.info(f"Buscando posição para MMSI: {mmsi} (usuário: {current_user})")
     
     posicoes = {
@@ -253,10 +223,6 @@ async def obter_posicao(mmsi: str, current_user: str = Depends(get_current_user)
 
 @app.get("/v1/posicao", response_model=List[PosicaoAIS], tags=["Posição AIS"])
 async def obter_posicoes_todas(current_user: str = Depends(get_current_user)):
-    """
-    Obtém as posições de TODAS as unidades marítimas
-    """
-    
     logger.info(f"Buscando todas as posições (usuário: {current_user})")
     
     posicoes = [
@@ -282,7 +248,6 @@ async def obter_posicoes_todas(current_user: str = Depends(get_current_user)):
 # ============================================
 
 def custom_openapi():
-    """Customiza a documentação OpenAPI"""
     if app.openapi_schema:
         return app.openapi_schema
     
@@ -292,10 +257,6 @@ def custom_openapi():
         description="API para localização e monitoramento de unidades marítimas integrada com Spinergie",
         routes=app.routes,
     )
-    
-    openapi_schema["info"]["x-logo"] = {
-        "url": "https://www.ibama.gov.br/imagens/logo.png"
-    }
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -313,7 +274,6 @@ if __name__ == "__main__":
     
     logger.info("Iniciando API IBAMA...")
     logger.info(f"CLIENT_ID: {CLIENT_ID}")
-    logger.info(f"SPINERGIE_BASE_URL: {SPINERGIE_BASE_URL}")
     
     uvicorn.run(
         app,
