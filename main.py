@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorization
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import jwt
 import httpx
 import os
@@ -69,7 +69,7 @@ class UnidadeMaritima(BaseModel):
     imo: str
     mmsi: str
     tipoUnidade: str
-    licencasAutorizadas: list
+    licencasAutorizadas: List[str]
     disponibilidadeInicio: str
     disponibilidadeFim: str
 
@@ -133,7 +133,6 @@ async def get_current_user(
 ) -> str:
     """Obtém o usuário atual baseado no token"""
     
-    # Tenta obter token de diferentes formas
     if credentials:
         token = credentials.credentials
     
@@ -144,7 +143,6 @@ async def get_current_user(
             detail="Token não fornecido"
         )
     
-    # Verifica o token
     payload = verificar_token_jwt(token)
     return payload.get("sub")
 
@@ -156,16 +154,11 @@ async def get_current_user(
 async def health_check():
     """
     Health Check - Verifica se a API está funcionando
-    
-    Retorna:
-    - status: "ok" se tudo está funcionando
-    - timestamp: data/hora atual
-    - version: versão da API
     """
     logger.info("Health check realizado")
     return {
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "1.0.0"
     }
 
@@ -173,19 +166,8 @@ async def health_check():
 async def obter_token(request: TokenRequest):
     """
     Obtém um token JWT para autenticação
-    
-    Requisição:
-    - client_id: ID do cliente (ibama_client)
-    - client_secret: Senha do cliente
-    - grant_type: Sempre "client_credentials"
-    
-    Retorna:
-    - access_token: Token JWT para usar nos endpoints protegidos
-    - token_type: "Bearer"
-    - expires_in: Segundos até expiração (3600 = 1 hora)
     """
     
-    # Valida as credenciais
     if request.client_id != CLIENT_ID or request.client_secret != CLIENT_SECRET:
         logger.warning(f"Tentativa de autenticação falha com client_id: {request.client_id}")
         raise HTTPException(
@@ -193,7 +175,6 @@ async def obter_token(request: TokenRequest):
             detail="Credenciais inválidas"
         )
     
-    # Cria o token
     expires_in = 3600
     token = criar_token_jwt(request.client_id, expires_in)
     
@@ -205,20 +186,14 @@ async def obter_token(request: TokenRequest):
         "expires_in": expires_in
     }
 
-@app.get("/v1/unidades", response_model=list[UnidadeMaritima], tags=["Unidades Marítimas"])
+@app.get("/v1/unidades", response_model=List[UnidadeMaritima], tags=["Unidades Marítimas"])
 async def listar_unidades(current_user: str = Depends(get_current_user)):
     """
     Lista todas as unidades marítimas
-    
-    Requer autenticação via token JWT
-    
-    Retorna:
-    - Lista de unidades marítimas com seus dados
     """
     
     logger.info(f"Listando unidades marítimas para usuário: {current_user}")
     
-    # Dados de exemplo (substitua com dados reais do Spinergie)
     unidades = [
         {
             "nome": "Plataforma P-01",
@@ -247,34 +222,22 @@ async def listar_unidades(current_user: str = Depends(get_current_user)):
 async def obter_posicao(mmsi: str, current_user: str = Depends(get_current_user)):
     """
     Obtém a posição geográfica de uma unidade marítima
-    
-    Parâmetros:
-    - mmsi: Identificador MMSI da unidade (ex: 123456789)
-    
-    Requer autenticação via token JWT
-    
-    Retorna:
-    - mmsi: Identificador da unidade
-    - latitude: Latitude em graus decimais
-    - longitude: Longitude em graus decimais
-    - timestampAquisicao: Data/hora da última posição
     """
     
     logger.info(f"Buscando posição para MMSI: {mmsi} (usuário: {current_user})")
     
-    # Dados de exemplo (substitua com dados reais do Spinergie)
     posicoes = {
         "123456789": {
             "mmsi": "123456789",
             "latitude": -22.9068,
             "longitude": -42.0281,
-            "timestampAquisicao": datetime.utcnow().isoformat()
+            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
         },
         "987654321": {
             "mmsi": "987654321",
             "latitude": -23.5505,
             "longitude": -46.6333,
-            "timestampAquisicao": datetime.utcnow().isoformat()
+            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
         }
     }
     
@@ -288,32 +251,26 @@ async def obter_posicao(mmsi: str, current_user: str = Depends(get_current_user)
     logger.info(f"Posição encontrada para MMSI: {mmsi}")
     return posicoes[mmsi]
 
-@app.get("/v1/posicao", tags=["Posição AIS"])
+@app.get("/v1/posicao", response_model=List[PosicaoAIS], tags=["Posição AIS"])
 async def obter_posicoes_todas(current_user: str = Depends(get_current_user)):
     """
     Obtém as posições de TODAS as unidades marítimas
-    
-    Requer autenticação via token JWT
-    
-    Retorna:
-    - Lista com posições de todas as unidades
     """
     
     logger.info(f"Buscando todas as posições (usuário: {current_user})")
     
-    # Dados de exemplo
     posicoes = [
         {
             "mmsi": "123456789",
             "latitude": -22.9068,
             "longitude": -42.0281,
-            "timestampAquisicao": datetime.utcnow().isoformat()
+            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
         },
         {
             "mmsi": "987654321",
             "latitude": -23.5505,
             "longitude": -46.6333,
-            "timestampAquisicao": datetime.utcnow().isoformat()
+            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
         }
     ]
     
@@ -352,14 +309,12 @@ app.openapi = custom_openapi
 if __name__ == "__main__":
     import uvicorn
     
-    # Criar pasta de logs se não existir
     os.makedirs("logs", exist_ok=True)
     
     logger.info("Iniciando API IBAMA...")
     logger.info(f"CLIENT_ID: {CLIENT_ID}")
     logger.info(f"SPINERGIE_BASE_URL: {SPINERGIE_BASE_URL}")
     
-    # Iniciar servidor Uvicorn
     uvicorn.run(
         app,
         host="0.0.0.0",
