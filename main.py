@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 import jwt
@@ -8,15 +8,14 @@ from datetime import datetime, timedelta
 
 load_dotenv()
 
-# Config
-CLIENT_ID = os.getenv("CLIENT_ID", "ibama_client")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "seu_secret")
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "seu_jwt_secret")
-
 app = FastAPI(
     title="API Unidades Marítimas IBAMA",
     version="1.0.0"
 )
+
+CLIENT_ID = os.getenv("CLIENT_ID", "ibama_client")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "seu_secret")
+JWT_SECRET = os.getenv("JWT_SECRET_KEY", "seu_jwt_secret")
 
 # Models
 class TokenRequest(BaseModel):
@@ -44,16 +43,16 @@ class PosicaoAIS(BaseModel):
     longitude: float
     timestampAquisicao: str
 
-# Auth
+# Functions
 def criar_token(client_id: str) -> str:
     payload = {
         "sub": client_id,
-        "exp": datetime.utcnow() + timedelta(hours=1),
-        "iat": datetime.utcnow()
+        "exp": datetime.now(datetime.UTC) + timedelta(hours=1),
+        "iat": datetime.now(datetime.UTC)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-def verificar_token(authorization: Optional[str] = Header(None)) -> str:
+def verificar_token(authorization: Optional[str] = None) -> str:
     if not authorization:
         raise HTTPException(status_code=401, detail="Token não fornecido")
     
@@ -63,7 +62,7 @@ def verificar_token(authorization: Optional[str] = Header(None)) -> str:
             raise HTTPException(status_code=401, detail="Inválido")
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload.get("sub")
-    except:
+    except Exception as e:
         raise HTTPException(status_code=401, detail="Token inválido")
 
 # Endpoints
@@ -83,7 +82,9 @@ async def get_token(request: TokenRequest):
     }
 
 @app.get("/v1/unidades", response_model=List[UnidadeMaritima])
-async def listar_unidades(user: str = Depends(verificar_token)):
+async def listar_unidades(authorization: Optional[str] = None):
+    user = verificar_token(authorization)
+    
     return [
         {
             "nome": "Plataforma P-01",
@@ -91,19 +92,20 @@ async def listar_unidades(user: str = Depends(verificar_token)):
             "mmsi": "123456789",
             "tipoUnidade": "UNIDADE_PRODUCAO",
             "licencasAutorizadas": ["LO1234/2025"],
-            "disponibilidadeInicio": "2024-01-01T00:00:00Z",
-            "disponibilidadeFim": "2026-12-31T23:59:59Z"
+            "disponibilidadeInicio": "2024-01-01T00:00:00Z"
         }
     ]
 
 @app.get("/v1/posicao/{mmsi}", response_model=PosicaoAIS)
-async def obter_posicao(mmsi: str, user: str = Depends(verificar_token)):
+async def obter_posicao(mmsi: str, authorization: Optional[str] = None):
+    user = verificar_token(authorization)
+    
     if mmsi == "123456789":
         return {
             "mmsi": "123456789",
             "latitude": -22.9068,
             "longitude": -42.0281,
-            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
+            "timestampAquisicao": datetime.now(datetime.UTC).isoformat() + "Z"
         }
     raise HTTPException(status_code=404, detail="MMSI não encontrado")
 
