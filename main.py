@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL CORRIGIDA
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL CORRIGIDA COM SPINERGIE CORRETO
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -12,11 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import timedelta, datetime, timezone
 from typing import List
-from pydantic import BaseModel, Field
 import os
 import jwt
 import json
 import logging
+import time
 
 from auth import authenticate_client, create_access_token
 from models import UnidadeMaritima, PosicaoAIS
@@ -97,7 +97,7 @@ def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(se
 
 # ENDPOINTS
 
-@app.get("/", tags=["Root"])
+@app.get("/")
 async def root():
     """Endpoint raiz da API"""
     return {
@@ -108,7 +108,7 @@ async def root():
     }
 
 
-@app.get("/health", tags=["Health"])
+@app.get("/health")
 async def health_check():
     """Health check da API"""
     return {
@@ -118,7 +118,7 @@ async def health_check():
     }
 
 
-@app.post("/auth/token", tags=["Authentication"])
+@app.post("/auth/token")
 async def get_token(
     grant_type: str = Form(...),
     client_id: str = Form(...),
@@ -166,18 +166,31 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
             "apiKey": SPINERGIE_API_KEY
         }
         
-        # ✅ URL CORRETA DO SPINERGIE
-        url = f"{SPINERGIE_BASE_URL}/osv/api/reporting/activities"
+        # ✅ URL CORRETA DO SPINERGIE - /osv/api/location/activities
+        url = f"{SPINERGIE_BASE_URL}/osv/api/location/activities"
+        
+        # ✅ PARÂMETROS OBRIGATÓRIOS DO SPINERGIE
+        # activityDatetime: timestamp em milissegundos (últimos 30 dias)
+        now_ms = int(time.time() * 1000)
+        thirty_days_ago_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        
+        params = {
+            "activityDatetime": f"{thirty_days_ago_ms},{now_ms}"
+        }
         
         logger.debug(f"[DEBUG] Chamando Spinergie: GET {url}")
+        logger.debug(f"[DEBUG] Params: {params}")
         
-        response = requests.get(url, headers=headers, timeout=60, verify=False)
+        response = requests.get(url, headers=headers, params=params, timeout=60, verify=False)
         
         logger.debug(f"[DEBUG] Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+        logger.debug(f"[DEBUG] Response Length: {len(response.text)}")
         
         if response.status_code == 200:
             try:
                 vessels_data = response.json()
+                
+                logger.debug(f"[DEBUG] JSON parsed successfully")
                 
                 # Trata diferentes estruturas de resposta
                 if isinstance(vessels_data, dict):
@@ -220,33 +233,28 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
             
             except json.JSONDecodeError:
                 logger.error("[ERROR] Resposta do Spinergie não é JSON válido")
-                # Fallback para dados mock
                 logger.info("[INFO] Usando dados mock como fallback")
                 return get_all_vessels()
         
         elif response.status_code == 401:
             logger.error("[ERROR] Spinergie 401 - apiKey inválida")
-            # Fallback para dados mock
             return get_all_vessels()
         
         else:
             logger.error(f"[ERROR] Spinergie Status: {response.status_code}")
-            # Fallback para dados mock
+            logger.error(f"[ERROR] Response: {response.text[:500]}")
             return get_all_vessels()
     
     except requests.Timeout:
         logger.error("[ERROR] Timeout ao chamar Spinergie")
-        # Fallback para dados mock
         return get_all_vessels()
     
     except requests.ConnectionError as e:
         logger.error(f"[ERROR] Connection Error: {e}")
-        # Fallback para dados mock
         return get_all_vessels()
     
     except Exception as e:
         logger.error(f"[ERROR] Exception: {str(e)}")
-        # Fallback para dados mock
         return get_all_vessels()
 
 
@@ -268,35 +276,41 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
             "apiKey": SPINERGIE_API_KEY
         }
         
-        # ✅ URL CORRETA DO SPINERGIE
-        url = f"{SPINERGIE_BASE_URL}/osv/api/reporting/activities"
+        # ✅ URL CORRETA DO SPINERGIE - /osv/api/location/activities
+        url = f"{SPINERGIE_BASE_URL}/osv/api/location/activities"
+        
+        # ✅ PARÂMETROS OBRIGATÓRIOS DO SPINERGIE
+        # activityDatetime: timestamp em milissegundos (últimos 30 dias)
+        now_ms = int(time.time() * 1000)
+        thirty_days_ago_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        
+        params = {
+            "activityDatetime": f"{thirty_days_ago_ms},{now_ms}"
+        }
         
         logger.debug(f"[DEBUG] Chamando Spinergie: GET {url}")
         logger.debug(f"[DEBUG] MMSI procurado: {mmsi}")
-        logger.debug(f"[DEBUG] Headers: {{'apiKey': '****', 'Accept': 'application/json', 'Content-Type': 'application/json'}}")
+        logger.debug(f"[DEBUG] Params: {params}")
         
-        response = requests.get(url, headers=headers, timeout=60, verify=False)
+        response = requests.get(url, headers=headers, params=params, timeout=60, verify=False)
         
         logger.debug(f"[DEBUG] Spinergie Status Code: {response.status_code}")
         logger.debug(f"[DEBUG] Spinergie Response Length: {len(response.text)}")
-        logger.debug(f"[DEBUG] Spinergie Response: {response.text[:500]}")  # Primeiros 500 chars
         
         if response.status_code == 200:
             try:
                 data = response.json()
                 logger.debug(f"[DEBUG] JSON parsed successfully from Spinergie")
                 
-                activities = data.get("activities", data.get("data", []))
-                
-                if not isinstance(activities, list):
-                    activities = [activities]
+                # Spinergie retorna array de activities
+                activities = data if isinstance(data, list) else data.get("activities", [])
                 
                 logger.debug(f"[DEBUG] Total activities do Spinergie: {len(activities)}")
                 
                 # Procura o vessel com MMSI específico
                 for activity in activities:
-                    mmsi_atual = str(activity.get("mmsi", ""))
-                    logger.debug(f"[DEBUG] Verificando MMSI: {mmsi_atual} == {mmsi} ?")
+                    mmsi_atual = str(activity.get("vesselId", ""))
+                    logger.debug(f"[DEBUG] Verificando vesselId: {mmsi_atual} == {mmsi} ?")
                     
                     if mmsi_atual == mmsi:
                         logger.info(f"[SUCCESS] Encontrado vessel com MMSI: {mmsi}")
@@ -304,7 +318,10 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
                             mmsi=mmsi,
                             latitude=activity.get("latitude", 0.0),
                             longitude=activity.get("longitude", 0.0),
-                            timestampAquisicao=activity.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z")
+                            timestampAquisicao=datetime.fromtimestamp(
+                                activity.get("dateEnd", int(time.time() * 1000)) / 1000,
+                                tz=timezone.utc
+                            ).isoformat() + "Z"
                         )
                 
                 # Se não encontrou no Spinergie, tenta dados mock
@@ -320,16 +337,15 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
             
             except json.JSONDecodeError as e:
                 logger.error(f"[ERROR] JSON Decode Error: {str(e)}")
-                logger.error(f"[ERROR] Response text: {response.text}")
-                raise HTTPException(status_code=502, detail={"error": "invalid_response", "message": str(e)})
+                raise HTTPException(status_code=502, detail={"error": "invalid_response"})
         
         elif response.status_code == 401:
             logger.error(f"[ERROR] Spinergie 401: apiKey inválida ou expirada")
-            raise HTTPException(status_code=502, detail={"error": "spinergie_auth_error", "message": "apiKey invalid or expired"})
+            raise HTTPException(status_code=502, detail={"error": "spinergie_auth_error"})
         
         else:
-            logger.error(f"[ERROR] Spinergie Status {response.status_code}: {response.text}")
-            raise HTTPException(status_code=502, detail={"error": "spinergie_error", "status_code": response.status_code, "response": response.text[:200]})
+            logger.error(f"[ERROR] Spinergie Status {response.status_code}: {response.text[:200]}")
+            raise HTTPException(status_code=502, detail={"error": "spinergie_error"})
     
     except requests.Timeout as e:
         logger.error(f"[ERROR] Timeout: {str(e)}")
@@ -352,7 +368,7 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
     
     except Exception as e:
         logger.error(f"[ERROR] Unexpected Exception: {str(e)}")
-        raise HTTPException(status_code=500, detail={"error": "internal_error", "message": str(e)})
+        raise HTTPException(status_code=500, detail={"error": "internal_error"})
 
 
 if __name__ == "__main__":
