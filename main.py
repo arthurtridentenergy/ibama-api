@@ -43,12 +43,12 @@ class PosicaoAIS(BaseModel):
     longitude: float
     timestampAquisicao: str
 
-# Functions
+# Auth
 def criar_token(client_id: str) -> str:
     payload = {
         "sub": client_id,
-        "exp": datetime.now(datetime.UTC) + timedelta(hours=1),
-        "iat": datetime.now(datetime.UTC)
+        "exp": datetime.utcnow() + timedelta(hours=1),
+        "iat": datetime.utcnow()
     }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
@@ -62,7 +62,7 @@ def verificar_token(authorization: Optional[str] = None) -> str:
             raise HTTPException(status_code=401, detail="Inválido")
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload.get("sub")
-    except Exception as e:
+    except:
         raise HTTPException(status_code=401, detail="Token inválido")
 
 # Endpoints
@@ -105,7 +105,7 @@ async def obter_posicao(mmsi: str, authorization: Optional[str] = None):
             "mmsi": "123456789",
             "latitude": -22.9068,
             "longitude": -42.0281,
-            "timestampAquisicao": datetime.now(datetime.UTC).isoformat() + "Z"
+            "timestampAquisicao": datetime.utcnow().isoformat() + "Z"
         }
     raise HTTPException(status_code=404, detail="MMSI não encontrado")
 
