@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL COM POSIÇÃO CORRIGIDA
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL COM SPINERGIE CORRETO
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -68,7 +68,6 @@ security = HTTPBearer()
 def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Valida JWT token do header Authorization"""
     token = credentials.credentials
-    logger.debug(f"[API] Recebido token (primeiros 50 chars): {token[:50]}...")
     
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
@@ -95,6 +94,7 @@ def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(se
 
 @app.get("/")
 async def root():
+    """Endpoint raiz da API"""
     return {
         "message": "IBAMA Location API",
         "version": "1.0.0",
@@ -105,6 +105,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Health check da API"""
     return {
         "status": "ok",
         "environment": ENVIRONMENT,
@@ -141,30 +142,27 @@ async def get_token(
 
 @app.get("/v1/unidades", response_model=List[UnidadeMaritima], tags=["Vessels"])
 async def get_unidades(client_id: str = Depends(get_current_client_id)):
-    """Lista todas as unidades marítimas autorizadas"""
+    """
+    Lista todas as unidades marítimas autorizadas
+    
+    Retorna array de UnidadeMaritima com todos os vessels cadastrados do Spinergie
+    """
     logger.info(f"[API] GET /v1/unidades - Client: {client_id}")
     
     try:
+        # ✅ HEADERS CORRETOS DO SPINERGIE (case-sensitive!)
         headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "apiKey": SPINERGIE_API_KEY
+            "Apikey": SPINERGIE_API_KEY,
+            "Accept": "application/json"
         }
         
-        # URL correta para atividades detectadas
-        url = f"{SPINERGIE_BASE_URL}/osv/api/location/activities"
+        # ✅ ENDPOINT CORRETO: /sd/api/vessel/sfm-latest-locations
+        url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
         
-        # Parâmetro obrigatório: activityDatetime (últimos 30 dias em milissegundos)
-        now_ms = int(time.time() * 1000)
-        thirty_days_ago_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        logger.debug(f"[DEBUG] Chamando Spinergie: GET {url}")
+        logger.debug(f"[DEBUG] Headers: Apikey (***), Accept: application/json")
         
-        params = {
-            "activityDatetime": f"{thirty_days_ago_ms},{now_ms}"
-        }
-        
-        logger.debug(f"[DEBUG] GET {url} com params: {params}")
-        
-        response = requests.get(url, headers=headers, params=params, timeout=60, verify=False)
+        response = requests.get(url, headers=headers, timeout=60, verify=False)
         
         logger.debug(f"[DEBUG] Status: {response.status_code}, Length: {len(response.text)}")
         
@@ -172,49 +170,65 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
             try:
                 vessels_data = response.json()
                 
-                if isinstance(vessels_data, dict):
-                    if "activities" in vessels_data:
-                        vessels_data = vessels_data["activities"]
-                    elif "vessels" in vessels_data:
-                        vessels_data = vessels_data["vessels"]
-                
+                # Validar que é uma lista
                 if not isinstance(vessels_data, list):
-                    vessels_data = [vessels_data] if vessels_data else []
+                    logger.warning("[WARNING] Resposta não é lista, tentando extrair dados")
+                    if isinstance(vessels_data, dict):
+                        vessels_data = vessels_data.get("data", [])
+                    else:
+                        vessels_data = []
                 
-                if vessels_data and len(vessels_data) > 0:
-                    unidades = []
-                    for vessel in vessels_data:
-                        try:
-                            tipo = vessel.get("type", vessel.get("tipoUnidade", "EMBARCACAO_APOIO"))
-                            unidades.append(UnidadeMaritima(
-                                nome=vessel.get("name", vessel.get("nome", "Nome Desconhecido")),
-                                imo=str(vessel.get("imo", "")) if vessel.get("imo") else None,
-                                mmsi=str(vessel.get("mmsi", "")),
-                                tipoUnidade=tipo,
-                                licencasAutorizadas=vessel.get("licenses", vessel.get("licencas", [])),
-                                disponibilidadeInicio=vessel.get("disponibilidadeInicio", datetime.now(timezone.utc).isoformat() + "Z"),
-                                disponibilidadeFim=vessel.get("disponibilidadeFim")
-                            ))
-                        except Exception as e:
-                            logger.warning(f"[WARNING] Erro ao processar vessel: {e}")
-                            continue
-                    
-                    logger.info(f"[API] Retornando {len(unidades)} unidades")
-                    return unidades
-                else:
-                    logger.info("[API] Spinergie retornou vazio, usando dados mock")
-                    return get_all_vessels()
+                logger.info(f"[DEBUG] Total vessels do Spinergie: {len(vessels_data)}")
+                
+                # Processar cada vessel
+                unidades = []
+                for vessel in vessels_data:
+                    try:
+                        # Mapear os campos do Spinergie para o modelo UnidadeMaritima
+                        unidades.append(UnidadeMaritima(
+                            nome=vessel.get("vesselTitle", "Nome Desconhecido"),
+                            imo=str(vessel.get("imo", "")) if vessel.get("imo") else None,
+                            mmsi=str(vessel.get("mmsi", "")),
+                            tipoUnidade=vessel.get("vesselType", "EMBARCACAO_APOIO"),
+                            licencasAutorizadas=[],  # Spinergie não retorna licenças
+                            disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
+                            disponibilidadeFim=None
+                        ))
+                    except Exception as e:
+                        logger.warning(f"[WARNING] Erro ao processar vessel: {e}")
+                        continue
+                
+                logger.info(f"[API] Retornando {len(unidades)} unidades do Spinergie")
+                return unidades
             
             except json.JSONDecodeError:
-                logger.error("[ERROR] JSON inválido do Spinergie")
+                logger.error("[ERROR] Resposta do Spinergie não é JSON válido")
+                logger.info("[INFO] Usando dados mock como fallback")
                 return get_all_vessels()
         
-        else:
-            logger.error(f"[ERROR] Spinergie Status: {response.status_code}")
+        elif response.status_code == 401:
+            logger.error("[ERROR] Spinergie 401 - Apikey inválida")
+            logger.info("[INFO] Usando dados mock como fallback")
             return get_all_vessels()
+        
+        else:
+            logger.error(f"[ERROR] Spinergie Status {response.status_code}: {response.text[:200]}")
+            logger.info("[INFO] Usando dados mock como fallback")
+            return get_all_vessels()
+    
+    except requests.Timeout:
+        logger.error("[ERROR] Timeout ao chamar Spinergie")
+        logger.info("[INFO] Usando dados mock como fallback")
+        return get_all_vessels()
+    
+    except requests.ConnectionError as e:
+        logger.error(f"[ERROR] Connection Error: {e}")
+        logger.info("[INFO] Usando dados mock como fallback")
+        return get_all_vessels()
     
     except Exception as e:
         logger.error(f"[ERROR] Exception: {str(e)}")
+        logger.info("[INFO] Usando dados mock como fallback")
         return get_all_vessels()
 
 
@@ -223,69 +237,64 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
     """
     Obtém a posição de um vessel específico pelo MMSI
     
-    Estratégia:
-    1. Tenta obter do Spinergie usando /osv/api/location/activities
-    2. Se não encontrar, tenta dados mock locais
+    Parâmetro: mmsi (9 dígitos)
+    Retorna: PosicaoAIS com coordenadas latitude/longitude e timestamp
     """
     logger.info(f"[API] GET /v1/posicao/{mmsi} - Client: {client_id}")
     
     try:
+        # ✅ HEADERS CORRETOS DO SPINERGIE
         headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "apiKey": SPINERGIE_API_KEY
+            "Apikey": SPINERGIE_API_KEY,
+            "Accept": "application/json"
         }
         
-        # Primeiro, tenta obter a lista de vessels para encontrar o vesselId correspondente ao MMSI
-        url_activities = f"{SPINERGIE_BASE_URL}/osv/api/location/activities"
+        # ✅ ENDPOINT CORRETO: /sd/api/vessel/sfm-latest-locations
+        url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
         
-        now_ms = int(time.time() * 1000)
-        thirty_days_ago_ms = now_ms - (30 * 24 * 60 * 60 * 1000)
+        logger.debug(f"[DEBUG] Buscando MMSI {mmsi} no endpoint: {url}")
         
-        params = {
-            "activityDatetime": f"{thirty_days_ago_ms},{now_ms}"
-        }
+        response = requests.get(url, headers=headers, timeout=60, verify=False)
         
-        logger.debug(f"[DEBUG] Procurando MMSI {mmsi} no Spinergie")
-        logger.debug(f"[DEBUG] GET {url_activities}")
-        
-        response = requests.get(url_activities, headers=headers, params=params, timeout=60, verify=False)
-        
-        logger.debug(f"[DEBUG] Status: {response.status_code}")
+        logger.debug(f"[DEBUG] Spinergie Status Code: {response.status_code}")
         
         if response.status_code == 200:
             try:
-                activities_data = response.json()
+                vessels_data = response.json()
                 
-                if not isinstance(activities_data, list):
-                    activities_data = activities_data.get("activities", []) if isinstance(activities_data, dict) else []
+                # Validar lista
+                if not isinstance(vessels_data, list):
+                    if isinstance(vessels_data, dict):
+                        vessels_data = vessels_data.get("data", [])
+                    else:
+                        vessels_data = []
                 
-                logger.debug(f"[DEBUG] Total activities: {len(activities_data)}")
+                logger.debug(f"[DEBUG] Total vessels recebidos: {len(vessels_data)}")
                 
-                # Procura por activities que correspondam ao MMSI ou que contenham latitude/longitude
-                for activity in activities_data:
-                    activity_mmsi = str(activity.get("mmsi", ""))
-                    activity_vessel_id = str(activity.get("vesselId", ""))
+                # Procurar o vessel com MMSI específico
+                for vessel in vessels_data:
+                    vessel_mmsi = str(vessel.get("mmsi", ""))
                     
-                    logger.debug(f"[DEBUG] Verificando activity - MMSI: {activity_mmsi}, vesselId: {activity_vessel_id}")
+                    logger.debug(f"[DEBUG] Verificando MMSI: {vessel_mmsi} == {mmsi} ?")
                     
-                    # Se encontrou a latitude/longitude, retorna
-                    if activity.get("latitude") and activity.get("longitude"):
-                        # Verifica se pertence ao MMSI procurado (se a API retornar esse campo)
-                        if activity_mmsi == mmsi or activity_vessel_id == mmsi:
-                            logger.info(f"[SUCCESS] Encontrada posição para MMSI {mmsi}")
-                            return PosicaoAIS(
-                                mmsi=mmsi,
-                                latitude=float(activity.get("latitude", 0.0)),
-                                longitude=float(activity.get("longitude", 0.0)),
-                                timestampAquisicao=datetime.fromtimestamp(
-                                    activity.get("dateEnd", int(time.time() * 1000)) / 1000,
-                                    tz=timezone.utc
-                                ).isoformat() + "Z"
-                            )
+                    if vessel_mmsi == mmsi:
+                        # Converter timestamp de milissegundos para segundos
+                        datetime_ms = vessel.get("datetime", int(time.time() * 1000))
+                        datetime_obj = datetime.fromtimestamp(
+                            datetime_ms / 1000,
+                            tz=timezone.utc
+                        )
+                        
+                        logger.info(f"[SUCCESS] Encontrada posição para MMSI {mmsi}")
+                        return PosicaoAIS(
+                            mmsi=mmsi,
+                            latitude=float(vessel.get("latitude", 0.0)),
+                            longitude=float(vessel.get("longitude", 0.0)),
+                            timestampAquisicao=datetime_obj.isoformat() + "Z"
+                        )
                 
-                # Se não encontrou no Spinergie com dados de posição, tenta dados mock
-                logger.warning(f"[WARNING] MMSI {mmsi} não encontrado com posição no Spinergie, tentando mock")
+                # Se não encontrou no Spinergie, tenta dados mock
+                logger.warning(f"[WARNING] MMSI {mmsi} não encontrado no Spinergie, tentando mock")
                 posicao = get_vessel_position(mmsi)
                 
                 if posicao:
@@ -297,16 +306,14 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
             
             except json.JSONDecodeError as e:
                 logger.error(f"[ERROR] JSON inválido: {str(e)}")
-                posicao = get_vessel_position(mmsi)
-                if posicao:
-                    return posicao
                 raise HTTPException(status_code=502, detail={"error": "invalid_response"})
+        
+        elif response.status_code == 401:
+            logger.error("[ERROR] Spinergie 401 - Apikey inválida")
+            raise HTTPException(status_code=502, detail={"error": "spinergie_auth_error"})
         
         else:
             logger.error(f"[ERROR] Spinergie Status {response.status_code}")
-            posicao = get_vessel_position(mmsi)
-            if posicao:
-                return posicao
             raise HTTPException(status_code=502, detail={"error": "spinergie_error"})
     
     except requests.Timeout:
