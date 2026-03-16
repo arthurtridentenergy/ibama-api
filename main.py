@@ -271,23 +271,35 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
         # ✅ URL CORRETA DO SPINERGIE
         url = f"{SPINERGIE_BASE_URL}/osv/api/reporting/activities"
         
-        logger.debug(f"[DEBUG] Chamando Spinergie: GET {url} - MMSI: {mmsi}")
+        logger.debug(f"[DEBUG] Chamando Spinergie: GET {url}")
+        logger.debug(f"[DEBUG] MMSI procurado: {mmsi}")
+        logger.debug(f"[DEBUG] Headers: {{'apiKey': '****', 'Accept': 'application/json', 'Content-Type': 'application/json'}}")
         
         response = requests.get(url, headers=headers, timeout=60, verify=False)
         
-        logger.debug(f"[DEBUG] Status: {response.status_code}")
+        logger.debug(f"[DEBUG] Spinergie Status Code: {response.status_code}")
+        logger.debug(f"[DEBUG] Spinergie Response Length: {len(response.text)}")
+        logger.debug(f"[DEBUG] Spinergie Response: {response.text[:500]}")  # Primeiros 500 chars
         
         if response.status_code == 200:
             try:
                 data = response.json()
+                logger.debug(f"[DEBUG] JSON parsed successfully from Spinergie")
+                
                 activities = data.get("activities", data.get("data", []))
                 
                 if not isinstance(activities, list):
                     activities = [activities]
                 
+                logger.debug(f"[DEBUG] Total activities do Spinergie: {len(activities)}")
+                
                 # Procura o vessel com MMSI específico
                 for activity in activities:
-                    if str(activity.get("mmsi")) == mmsi:
+                    mmsi_atual = str(activity.get("mmsi", ""))
+                    logger.debug(f"[DEBUG] Verificando MMSI: {mmsi_atual} == {mmsi} ?")
+                    
+                    if mmsi_atual == mmsi:
+                        logger.info(f"[SUCCESS] Encontrado vessel com MMSI: {mmsi}")
                         return PosicaoAIS(
                             mmsi=mmsi,
                             latitude=activity.get("latitude", 0.0),
@@ -296,43 +308,31 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
                         )
                 
                 # Se não encontrou no Spinergie, tenta dados mock
-                logger.info(f"[INFO] MMSI {mmsi} não encontrado no Spinergie, tentando dados mock")
+                logger.warning(f"[WARNING] MMSI {mmsi} não encontrado no Spinergie, tentando dados mock")
                 posicao = get_vessel_position(mmsi)
+                
                 if posicao:
+                    logger.info(f"[SUCCESS] Encontrado vessel em dados mock: {mmsi}")
                     return posicao
                 else:
-                    raise HTTPException(status_code=404, detail={"error": "not_found"})
+                    logger.error(f"[ERROR] MMSI {mmsi} não encontrado em nenhuma fonte")
+                    raise HTTPException(status_code=404, detail={"error": "not_found", "mmsi": mmsi})
             
-            except json.JSONDecodeError:
-                logger.error("[ERROR] Resposta do Spinergie não é JSON válido")
-                # Tenta dados mock
-                posicao = get_vessel_position(mmsi)
-                if posicao:
-                    return posicao
-                else:
-                    raise HTTPException(status_code=502, detail={"error": "invalid_response"})
+            except json.JSONDecodeError as e:
+                logger.error(f"[ERROR] JSON Decode Error: {str(e)}")
+                logger.error(f"[ERROR] Response text: {response.text}")
+                raise HTTPException(status_code=502, detail={"error": "invalid_response", "message": str(e)})
         
         elif response.status_code == 401:
-            logger.error("[ERROR] Spinergie 401 - apiKey inválida")
-            # Tenta dados mock
-            posicao = get_vessel_position(mmsi)
-            if posicao:
-                return posicao
-            else:
-                raise HTTPException(status_code=502, detail={"error": "auth_error"})
+            logger.error(f"[ERROR] Spinergie 401: apiKey inválida ou expirada")
+            raise HTTPException(status_code=502, detail={"error": "spinergie_auth_error", "message": "apiKey invalid or expired"})
         
         else:
-            logger.error(f"[ERROR] Spinergie Status: {response.status_code}")
-            # Tenta dados mock
-            posicao = get_vessel_position(mmsi)
-            if posicao:
-                return posicao
-            else:
-                raise HTTPException(status_code=502, detail={"error": "api_error"})
+            logger.error(f"[ERROR] Spinergie Status {response.status_code}: {response.text}")
+            raise HTTPException(status_code=502, detail={"error": "spinergie_error", "status_code": response.status_code, "response": response.text[:200]})
     
-    except requests.Timeout:
-        logger.error("[ERROR] Timeout ao chamar Spinergie")
-        # Tenta dados mock
+    except requests.Timeout as e:
+        logger.error(f"[ERROR] Timeout: {str(e)}")
         posicao = get_vessel_position(mmsi)
         if posicao:
             return posicao
@@ -340,8 +340,7 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
             raise HTTPException(status_code=504, detail={"error": "timeout"})
     
     except requests.ConnectionError as e:
-        logger.error(f"[ERROR] Connection Error: {e}")
-        # Tenta dados mock
+        logger.error(f"[ERROR] Connection Error: {str(e)}")
         posicao = get_vessel_position(mmsi)
         if posicao:
             return posicao
@@ -352,8 +351,8 @@ async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)
         raise
     
     except Exception as e:
-        logger.error(f"[ERROR] Exception: {str(e)}")
-        raise HTTPException(status_code=500, detail={"error": "internal_error"})
+        logger.error(f"[ERROR] Unexpected Exception: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": "internal_error", "message": str(e)})
 
 
 if __name__ == "__main__":
