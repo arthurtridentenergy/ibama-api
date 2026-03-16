@@ -67,17 +67,32 @@ security = HTTPBearer()
 
 def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Valida JWT token do header Authorization"""
+    
     token = credentials.credentials
+    logger.debug(f"[API] Recebido token de autenticação (primeiros 50 chars): {token[:50]}...")
+    
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
         client_id: str = payload.get("sub")
+        
         if client_id is None:
+            logger.warning("[API] Token válido mas sem 'sub' claim")
             raise HTTPException(status_code=401, detail={"error": "invalid_token"})
+        
+        logger.info(f"[API] Token validado com sucesso para client_id: {client_id}")
         return client_id
+    
     except jwt.ExpiredSignatureError:
+        logger.warning("[API] Token expirado")
         raise HTTPException(status_code=401, detail={"error": "token_expired"})
-    except jwt.InvalidTokenError:
+    
+    except jwt.InvalidTokenError as e:
+        logger.error(f"[API] Token inválido: {str(e)}")
         raise HTTPException(status_code=401, detail={"error": "invalid_token"})
+    
+    except Exception as e:
+        logger.error(f"[API] Erro inesperado ao validar token: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": "internal_error"})
 
 
 # ENDPOINTS
