@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL COM SPINERGIE CORRETO
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL CORRIGIDA
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import timedelta, datetime, timezone
-from typing import List, Optional
+from typing import List
 import os
 import jwt
 import json
@@ -34,14 +34,36 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 ALGORITHM = "HS256"
 CLIENT_ID = os.getenv("CLIENT_ID", "ibama_client_id")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://trident-energy-br.spinergie.com")
+SPINERGIE_BASE_URL = os.getenv(
+    "SPINERGIE_BASE_URL",
+    "https://trident-energy-br.spinergie.com"
+)
 SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
+# ✅ MMSIs AUTORIZADOS — Apenas embarcações Trident
+MMSI_AUTORIZADOS = {
+    "710001720": {
+        "nome": "MAERSK VEGA",
+        "imo": "9294082",
+        "tipoUnidade": "EMBARCACAO_EMERGENCIA_APOIO"
+    },
+    "710005854": {
+        "nome": "MAERSK MAKER",
+        "imo": "9765483",
+        "tipoUnidade": "EMBARCACAO_APOIO"
+    },
+    "710002450": {
+        "nome": "Maersk Ventura",
+        "imo": "9294094",
+        "tipoUnidade": "EMBARCACAO_APOIO"
+    }
+}
+
 logger.info(f"[CONFIG] Environment: {ENVIRONMENT}")
 logger.info(f"[CONFIG] JWT_SECRET_KEY: {'✅ Carregado' if JWT_SECRET_KEY else '❌ Não carregado'}")
-logger.info(f"[CONFIG] CLIENT_ID: {CLIENT_ID}")
-logger.info(f"[CONFIG] SPINERGIE_API_KEY: {'✅ Carregado' if SPINERGIE_API_KEY else '❌ Não carregado'}\n")
+logger.info(f"[CONFIG] SPINERGIE_API_KEY: {'✅ Carregado' if SPINERGIE_API_KEY else '❌ Não carregado'}")
+logger.info(f"[CONFIG] MMSIs autorizados: {list(MMSI_AUTORIZADOS.keys())}\n")
 
 # Inicialização FastAPI
 app = FastAPI(
@@ -65,32 +87,59 @@ app.add_middleware(
 security = HTTPBearer()
 
 
-def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+def normalizar_mmsi(mmsi_raw) -> str:
+    """
+    Normaliza o MMSI removendo casas decimais desnecessárias.
+    Spinergie retorna float: 710005854.0 → deve ser '710005854'
+    """
+    try:
+        return str(int(float(str(mmsi_raw))))
+    except Exception:
+        return str(mmsi_raw).strip()
+
+
+def get_current_client_id(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
     """Valida JWT token do header Authorization"""
     token = credentials.credentials
-    
+
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
         client_id: str = payload.get("sub")
-        
+
         if client_id is None:
-            raise HTTPException(status_code=401, detail={"error": "invalid_token"})
-        
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "invalid_token"}
+            )
+
         logger.info(f"[API] Token validado para: {client_id}")
         return client_id
-    
+
     except jwt.ExpiredSignatureError:
         logger.warning("[API] Token expirado")
-        raise HTTPException(status_code=401, detail={"error": "token_expired"})
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_expired"}
+        )
     except jwt.InvalidTokenError as e:
         logger.error(f"[API] Token inválido: {str(e)}")
-        raise HTTPException(status_code=401, detail={"error": "invalid_token"})
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_token"}
+        )
     except Exception as e:
         logger.error(f"[API] Erro ao validar token: {str(e)}")
-        raise HTTPException(status_code=500, detail={"error": "internal_error"})
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error"}
+        )
 
 
+# ──────────────────────────────────────────────
 # ENDPOINTS
+# ──────────────────────────────────────────────
 
 @app.get("/")
 async def root():
@@ -121,18 +170,24 @@ async def get_token(
 ):
     """Endpoint de autenticação OAuth 2.0 Client Credentials"""
     if grant_type != "client_credentials":
-        raise HTTPException(status_code=400, detail={"error": "unsupported_grant_type"})
-    
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unsupported_grant_type"}
+        )
+
     if not authenticate_client(client_id, client_secret):
-        raise HTTPException(status_code=401, detail={"error": "invalid_client"})
-    
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_client"}
+        )
+
     access_token = create_access_token(
         data={"sub": client_id},
         expires_delta=timedelta(hours=1)
     )
-    
+
     logger.info(f"[AUTH] Token gerado para: {client_id}")
-    
+
     return {
         "access_token": access_token,
         "token_type": "Bearer",
@@ -143,202 +198,275 @@ async def get_token(
 @app.get("/v1/unidades", response_model=List[UnidadeMaritima], tags=["Vessels"])
 async def get_unidades(client_id: str = Depends(get_current_client_id)):
     """
-    Lista todas as unidades marítimas autorizadas
-    
-    Retorna array de UnidadeMaritima com todos os vessels cadastrados do Spinergie
+    Lista as unidades marítimas autorizadas da Trident Energy.
+
+    Retorna APENAS as 3 embarcações cadastradas:
+    - MAERSK VEGA (710001720)
+    - MAERSK MAKER (710005854)
+    - Maersk Ventura (710002450)
     """
     logger.info(f"[API] GET /v1/unidades - Client: {client_id}")
-    
+
     try:
-        # ✅ HEADERS CORRETOS DO SPINERGIE (case-sensitive!)
+        # ✅ Headers corretos do Spinergie (case-sensitive)
         headers = {
             "Apikey": SPINERGIE_API_KEY,
             "Accept": "application/json"
         }
-        
-        # ✅ ENDPOINT CORRETO: /sd/api/vessel/sfm-latest-locations
+
+        # ✅ Endpoint correto para posições mais recentes
         url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
-        
+
         logger.debug(f"[DEBUG] Chamando Spinergie: GET {url}")
-        logger.debug(f"[DEBUG] Headers: Apikey (***), Accept: application/json")
-        
-        response = requests.get(url, headers=headers, timeout=60, verify=False)
-        
-        logger.debug(f"[DEBUG] Status: {response.status_code}, Length: {len(response.text)}")
-        
+
+        response = requests.get(
+            url, headers=headers, timeout=60, verify=False
+        )
+
+        logger.debug(f"[DEBUG] Status: {response.status_code}")
+
         if response.status_code == 200:
-            try:
-                vessels_data = response.json()
-                
-                # Validar que é uma lista
-                if not isinstance(vessels_data, list):
-                    logger.warning("[WARNING] Resposta não é lista, tentando extrair dados")
-                    if isinstance(vessels_data, dict):
-                        vessels_data = vessels_data.get("data", [])
-                    else:
-                        vessels_data = []
-                
-                logger.info(f"[DEBUG] Total vessels do Spinergie: {len(vessels_data)}")
-                
-                # Processar cada vessel
-                unidades = []
-                for vessel in vessels_data:
-                    try:
-                        # Mapear os campos do Spinergie para o modelo UnidadeMaritima
-                        unidades.append(UnidadeMaritima(
-                            nome=vessel.get("vesselTitle", "Nome Desconhecido"),
-                            imo=str(vessel.get("imo", "")) if vessel.get("imo") else None,
-                            mmsi=str(vessel.get("mmsi", "")),
-                            tipoUnidade=vessel.get("vesselType", "EMBARCACAO_APOIO"),
-                            licencasAutorizadas=[],  # Spinergie não retorna licenças
-                            disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
-                            disponibilidadeFim=None
-                        ))
-                    except Exception as e:
-                        logger.warning(f"[WARNING] Erro ao processar vessel: {e}")
-                        continue
-                
-                logger.info(f"[API] Retornando {len(unidades)} unidades do Spinergie")
+            vessels_data = response.json()
+
+            if not isinstance(vessels_data, list):
+                vessels_data = vessels_data.get("data", [])
+
+            logger.debug(
+                f"[DEBUG] Total vessels Spinergie: {len(vessels_data)}"
+            )
+
+            unidades = []
+
+            for vessel in vessels_data:
+                # ✅ Normaliza MMSI (remove .0 do float)
+                mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
+
+                # ✅ Filtra APENAS os MMSIs autorizados Trident
+                if mmsi not in MMSI_AUTORIZADOS:
+                    logger.debug(
+                        f"[DEBUG] MMSI {mmsi} ignorado (não autorizado)"
+                    )
+                    continue
+
+                dados_fixos = MMSI_AUTORIZADOS[mmsi]
+
+                logger.info(
+                    f"[API] Incluindo vessel autorizado: "
+                    f"{dados_fixos['nome']} (MMSI: {mmsi})"
+                )
+
+                unidades.append(UnidadeMaritima(
+                    nome=dados_fixos["nome"],
+                    imo=dados_fixos["imo"],
+                    mmsi=mmsi,
+                    tipoUnidade=dados_fixos["tipoUnidade"],
+                    licencasAutorizadas=[],
+                    disponibilidadeInicio=datetime.now(
+                        timezone.utc
+                    ).isoformat() + "Z",
+                    disponibilidadeFim=None
+                ))
+
+            if unidades:
+                logger.info(
+                    f"[API] Retornando {len(unidades)} unidades autorizadas"
+                )
                 return unidades
-            
-            except json.JSONDecodeError:
-                logger.error("[ERROR] Resposta do Spinergie não é JSON válido")
-                logger.info("[INFO] Usando dados mock como fallback")
-                return get_all_vessels()
-        
-        elif response.status_code == 401:
-            logger.error("[ERROR] Spinergie 401 - Apikey inválida")
-            logger.info("[INFO] Usando dados mock como fallback")
-            return get_all_vessels()
-        
+
+            # Fallback: Spinergie não retornou os MMSIs esperados
+            logger.warning(
+                "[WARNING] Nenhum MMSI autorizado encontrado no Spinergie. "
+                "Usando dados estáticos."
+            )
+            return _get_unidades_estaticas()
+
         else:
-            logger.error(f"[ERROR] Spinergie Status {response.status_code}: {response.text[:200]}")
-            logger.info("[INFO] Usando dados mock como fallback")
-            return get_all_vessels()
-    
+            logger.error(
+                f"[ERROR] Spinergie Status {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+            return _get_unidades_estaticas()
+
     except requests.Timeout:
         logger.error("[ERROR] Timeout ao chamar Spinergie")
-        logger.info("[INFO] Usando dados mock como fallback")
-        return get_all_vessels()
-    
+        return _get_unidades_estaticas()
+
     except requests.ConnectionError as e:
         logger.error(f"[ERROR] Connection Error: {e}")
-        logger.info("[INFO] Usando dados mock como fallback")
-        return get_all_vessels()
-    
+        return _get_unidades_estaticas()
+
     except Exception as e:
         logger.error(f"[ERROR] Exception: {str(e)}")
-        logger.info("[INFO] Usando dados mock como fallback")
-        return get_all_vessels()
+        return _get_unidades_estaticas()
+
+
+def _get_unidades_estaticas() -> List[UnidadeMaritima]:
+    """
+    Retorna os dados estáticos das embarcações autorizadas.
+    Usado como fallback quando Spinergie não responde.
+    """
+    return [
+        UnidadeMaritima(
+            nome=dados["nome"],
+            imo=dados["imo"],
+            mmsi=mmsi,
+            tipoUnidade=dados["tipoUnidade"],
+            licencasAutorizadas=[],
+            disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
+            disponibilidadeFim=None
+        )
+        for mmsi, dados in MMSI_AUTORIZADOS.items()
+    ]
 
 
 @app.get("/v1/posicao/{mmsi}", response_model=PosicaoAIS, tags=["Vessels"])
-async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)):
+async def get_posicao(
+    mmsi: str,
+    client_id: str = Depends(get_current_client_id)
+):
     """
-    Obtém a posição de um vessel específico pelo MMSI
-    
-    Parâmetro: mmsi (9 dígitos)
-    Retorna: PosicaoAIS com coordenadas latitude/longitude e timestamp
+    Obtém a posição de uma embarcação pelo MMSI.
+
+    Apenas MMSIs autorizados Trident são aceitos:
+    - 710001720 (MAERSK VEGA)
+    - 710005854 (MAERSK MAKER)
+    - 710002450 (Maersk Ventura)
     """
     logger.info(f"[API] GET /v1/posicao/{mmsi} - Client: {client_id}")
-    
+
+    # ✅ Normaliza o MMSI recebido
+    mmsi = normalizar_mmsi(mmsi)
+
+    # ✅ Valida se é um MMSI autorizado
+    if mmsi not in MMSI_AUTORIZADOS:
+        logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "mmsi": mmsi,
+                "message": "MMSI não encontrado ou não autorizado"
+            }
+        )
+
     try:
-        # ✅ HEADERS CORRETOS DO SPINERGIE
+        # ✅ Headers corretos do Spinergie
         headers = {
             "Apikey": SPINERGIE_API_KEY,
             "Accept": "application/json"
         }
-        
-        # ✅ ENDPOINT CORRETO: /sd/api/vessel/sfm-latest-locations
+
+        # ✅ Endpoint correto para últimas posições
         url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
-        
-        logger.debug(f"[DEBUG] Buscando MMSI {mmsi} no endpoint: {url}")
-        
-        response = requests.get(url, headers=headers, timeout=60, verify=False)
-        
-        logger.debug(f"[DEBUG] Spinergie Status Code: {response.status_code}")
-        
+
+        logger.debug(f"[DEBUG] Buscando MMSI {mmsi} em: {url}")
+
+        response = requests.get(
+            url, headers=headers, timeout=60, verify=False
+        )
+
+        logger.debug(f"[DEBUG] Status Spinergie: {response.status_code}")
+
         if response.status_code == 200:
-            try:
-                vessels_data = response.json()
-                
-                # Validar lista
-                if not isinstance(vessels_data, list):
-                    if isinstance(vessels_data, dict):
-                        vessels_data = vessels_data.get("data", [])
-                    else:
-                        vessels_data = []
-                
-                logger.debug(f"[DEBUG] Total vessels recebidos: {len(vessels_data)}")
-                
-                # Procurar o vessel com MMSI específico
-                for vessel in vessels_data:
-                    vessel_mmsi = str(vessel.get("mmsi", ""))
-                    
-                    logger.debug(f"[DEBUG] Verificando MMSI: {vessel_mmsi} == {mmsi} ?")
-                    
-                    if vessel_mmsi == mmsi:
-                        # Converter timestamp de milissegundos para segundos
-                        datetime_ms = vessel.get("datetime", int(time.time() * 1000))
-                        datetime_obj = datetime.fromtimestamp(
-                            datetime_ms / 1000,
-                            tz=timezone.utc
-                        )
-                        
-                        logger.info(f"[SUCCESS] Encontrada posição para MMSI {mmsi}")
-                        return PosicaoAIS(
-                            mmsi=mmsi,
-                            latitude=float(vessel.get("latitude", 0.0)),
-                            longitude=float(vessel.get("longitude", 0.0)),
-                            timestampAquisicao=datetime_obj.isoformat() + "Z"
-                        )
-                
-                # Se não encontrou no Spinergie, tenta dados mock
-                logger.warning(f"[WARNING] MMSI {mmsi} não encontrado no Spinergie, tentando mock")
-                posicao = get_vessel_position(mmsi)
-                
-                if posicao:
-                    logger.info(f"[SUCCESS] Retornando posição mock para MMSI {mmsi}")
-                    return posicao
-                else:
-                    logger.error(f"[ERROR] MMSI {mmsi} não encontrado")
-                    raise HTTPException(status_code=404, detail={"error": "not_found", "mmsi": mmsi})
-            
-            except json.JSONDecodeError as e:
-                logger.error(f"[ERROR] JSON inválido: {str(e)}")
-                raise HTTPException(status_code=502, detail={"error": "invalid_response"})
-        
+            vessels_data = response.json()
+
+            if not isinstance(vessels_data, list):
+                vessels_data = vessels_data.get("data", [])
+
+            logger.debug(
+                f"[DEBUG] Total vessels recebidos: {len(vessels_data)}"
+            )
+
+            for vessel in vessels_data:
+                # ✅ Normaliza MMSI do Spinergie (remove .0)
+                vessel_mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
+
+                logger.debug(
+                    f"[DEBUG] Comparando: {vessel_mmsi} == {mmsi} ?"
+                )
+
+                if vessel_mmsi == mmsi:
+                    latitude = vessel.get("latitude")
+                    longitude = vessel.get("longitude")
+                    datetime_ms = vessel.get(
+                        "datetime", int(time.time() * 1000)
+                    )
+
+                    # ✅ Converte timestamp de ms para ISO 8601
+                    datetime_obj = datetime.fromtimestamp(
+                        datetime_ms / 1000,
+                        tz=timezone.utc
+                    )
+
+                    logger.info(
+                        f"[SUCCESS] Posição encontrada para MMSI {mmsi}: "
+                        f"lat={latitude}, lon={longitude}"
+                    )
+
+                    return PosicaoAIS(
+                        mmsi=mmsi,
+                        latitude=float(latitude) if latitude else 0.0,
+                        longitude=float(longitude) if longitude else 0.0,
+                        timestampAquisicao=datetime_obj.isoformat() + "Z"
+                    )
+
+            # MMSI autorizado mas não encontrado no Spinergie
+            logger.warning(
+                f"[WARNING] MMSI {mmsi} autorizado mas não retornado "
+                f"pelo Spinergie"
+            )
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "not_found",
+                    "mmsi": mmsi,
+                    "message": "Embarcação autorizada mas sem posição disponível"
+                }
+            )
+
         elif response.status_code == 401:
             logger.error("[ERROR] Spinergie 401 - Apikey inválida")
-            raise HTTPException(status_code=502, detail={"error": "spinergie_auth_error"})
-        
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "spinergie_auth_error"}
+            )
+
         else:
-            logger.error(f"[ERROR] Spinergie Status {response.status_code}")
-            raise HTTPException(status_code=502, detail={"error": "spinergie_error"})
-    
+            logger.error(
+                f"[ERROR] Spinergie Status {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "spinergie_error"}
+            )
+
     except requests.Timeout:
-        logger.error("[ERROR] Timeout")
-        posicao = get_vessel_position(mmsi)
-        if posicao:
-            return posicao
-        raise HTTPException(status_code=504, detail={"error": "timeout"})
-    
-    except requests.ConnectionError:
-        logger.error("[ERROR] Connection Error")
-        posicao = get_vessel_position(mmsi)
-        if posicao:
-            return posicao
-        raise HTTPException(status_code=503, detail={"error": "connection_error"})
-    
+        logger.error("[ERROR] Timeout ao chamar Spinergie")
+        raise HTTPException(
+            status_code=504,
+            detail={"error": "timeout"}
+        )
+
+    except requests.ConnectionError as e:
+        logger.error(f"[ERROR] Connection Error: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "connection_error"}
+        )
+
     except HTTPException:
         raise
-    
+
     except Exception as e:
-        logger.error(f"[ERROR] Exception: {str(e)}")
-        raise HTTPException(status_code=500, detail={"error": "internal_error"})
+        logger.error(f"[ERROR] Exception inesperada: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error"}
+        )
 
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"\n[INFO] ========== INICIANDO API IBAMA ==========\n")
+    logger.info("\n[INFO] ========== INICIANDO API IBAMA ==========\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
