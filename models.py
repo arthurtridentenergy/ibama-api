@@ -21,20 +21,20 @@ class UnidadeMaritima(BaseModel):
     """Modelo de unidade marítima conforme especificação IBAMA 1.4.1"""
     nome: str = Field(..., description="Nome comercial ou de operação da unidade")
     imo: Optional[str] = Field(None, description="Número IMO (7 dígitos) ou nulo")
-    mmsi: str = Field(..., description="Número MMSI (9 dígitos) - Chave Principal")
-    tipoUnidade: str = Field(..., description="Categoria da unidade")
-    licencasAutorizadas: List[str] = Field(..., description="Lista de licenças ativas")
+    mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) - Nulo para plataformas")
+    tipoUnidade: TipoUnidade = Field(..., description="Categoria da unidade conforme enum")
+    licencasAutorizadas: List[str] = Field(default_factory=list, description="Lista de licenças ativas com números, validade e observações")
     disponibilidadeInicio: str = Field(..., description="Data/hora ISO 8601 UTC com Z")
     disponibilidadeFim: Optional[str] = Field(None, description="Data/hora ISO 8601 UTC com Z ou nulo")
 
     class Config:
         schema_extra = {
             "example": {
-                "nome": "MAERSK MAKER",
-                "imo": "9413535",
-                "mmsi": "710005854",
-                "tipoUnidade": "EMBARCACAO_APOIO",
-                "licencasAutorizadas": ["LO1234/2025", "LPS123/2025"],
+                "nome": "MAERSK VEGA",
+                "imo": "9294082",
+                "mmsi": "710001720",
+                "tipoUnidade": "EMBARCACAO_EMERGENCIA_APOIO",
+                "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
                 "disponibilidadeInicio": "2024-01-01T00:00:00Z",
                 "disponibilidadeFim": None
             }
@@ -51,7 +51,7 @@ class PosicaoAIS(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "mmsi": "710005854",
+                "mmsi": "710001720",
                 "latitude": -23.5505,
                 "longitude": -46.6333,
                 "timestampAquisicao": "2026-03-12T14:30:00Z"
