@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL CORRIGIDA
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -40,22 +40,26 @@ SPINERGIE_BASE_URL = os.getenv(
 SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
-# ✅ ATIVOS AUTORIZADOS — 2 Vessels + Seastar Virtus + 4 Plataformas
+# ✅ ATIVOS AUTORIZADOS — Conforme tabela IBAMA
 ATIVOS_AUTORIZADOS = {
-    # ===== VESSELS (2 — SEM MAERSK MAKER) =====
+    # ===== VESSELS (2) =====
     "710001720": {
         "nome": "MAERSK VEGA",
         "imo": "9294082",
         "mmsi": "710001720",
         "tipoUnidade": TipoUnidade.EMBARCACAO_EMERGENCIA_APOIO,
-        "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"]
+        "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
+        "validade": "N/A",
+        "observacao": None
     },
     "710002450": {
         "nome": "Maersk Ventura",
         "imo": "9294094",
         "mmsi": "710002450",
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
-        "licencasAutorizadas": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"]
+        "licencasAutorizadas": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"],
+        "validade": "N/A",
+        "observacao": None
     },
 
     # ===== SEASTAR VIRTUS =====
@@ -64,7 +68,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
-        "licencasAutorizadas": ["Ofício nº 95/2026/Coprod/CGMac/Dilic | Válido até: 06/abril/2026"]
+        "licencasAutorizadas": ["Ofício nº 95/2026/Coprod/CGMac/Dilic"],
+        "validade": "06/04/2026",
+        "observacao": None
     },
     
     # ===== PLATAFORMAS (4) =====
@@ -73,28 +79,36 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação | Válido até: 11/Julho/2024 | Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"]
+        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "validade": "11/07/2024",
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
     },
     "PCE1": {
         "nome": "PCE-1",
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação | Válido até: 11/Julho/2024 | Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"]
+        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "validade": "11/07/2024",
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
     },
     "P65": {
         "nome": "P65",
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação | Válido até: 11/Julho/2024 | Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"]
+        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "validade": "11/07/2024",
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
     },
     "P08": {
         "nome": "P08",
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação | Válido até: 11/Julho/2024 | Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"]
+        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "validade": "11/07/2024",
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
     }
 }
 
@@ -107,7 +121,7 @@ logger.info(f"[CONFIG] Ativos autorizados: {len(ATIVOS_AUTORIZADOS)} (2 vessels 
 app = FastAPI(
     title="IBAMA Location API",
     description="API de localização de embarcações e plataformas para o IBAMA/CGMAC",
-    version="2.1.0",
+    version="2.2.0",
     docs_url="/v1/docs",
     openapi_url="/v1/openapi.json"
 )
@@ -167,7 +181,7 @@ async def root():
     """Endpoint raiz da API"""
     return {
         "message": "IBAMA Location API",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "docs": "/v1/docs",
         "environment": ENVIRONMENT
     }
@@ -260,7 +274,7 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
             for vessel in vessels_data:
                 mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
 
-                # Verificar se é um dos vessels autorizados (apenas os 2, não Seastar)
+                # Verificar se é um dos vessels autorizados (apenas os 2)
                 if mmsi in ["710001720", "710002450"]:
                     if mmsi in ATIVOS_AUTORIZADOS:
                         dados = ATIVOS_AUTORIZADOS[mmsi]
@@ -275,6 +289,8 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
                             mmsi=mmsi,
                             tipoUnidade=dados["tipoUnidade"],
                             licencasAutorizadas=dados.get("licencasAutorizadas", []),
+                            validade=dados.get("validade"),
+                            observacao=dados.get("observacao"),
                             disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
                             disponibilidadeFim=None
                         ))
@@ -290,6 +306,8 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
                 mmsi=dados.get("mmsi"),
                 tipoUnidade=dados["tipoUnidade"],
                 licencasAutorizadas=dados.get("licencasAutorizadas", []),
+                validade=dados.get("validade"),
+                observacao=dados.get("observacao"),
                 disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
                 disponibilidadeFim=None
             ))
@@ -306,6 +324,8 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
                     mmsi=dados.get("mmsi"),
                     tipoUnidade=dados["tipoUnidade"],
                     licencasAutorizadas=dados.get("licencasAutorizadas", []),
+                    validade=dados.get("validade"),
+                    observacao=dados.get("observacao"),
                     disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
                     disponibilidadeFim=None
                 ))
@@ -339,6 +359,8 @@ def _get_unidades_estaticas() -> List[UnidadeMaritima]:
             mmsi=dados.get("mmsi"),
             tipoUnidade=dados["tipoUnidade"],
             licencasAutorizadas=dados.get("licencasAutorizadas", []),
+            validade=dados.get("validade"),
+            observacao=dados.get("observacao"),
             disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
             disponibilidadeFim=None
         ))
@@ -474,5 +496,5 @@ async def get_posicao(
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.1 ==========\n")
+    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.2 ==========\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

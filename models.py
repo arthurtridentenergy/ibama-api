@@ -23,7 +23,9 @@ class UnidadeMaritima(BaseModel):
     imo: Optional[str] = Field(None, description="Número IMO (7 dígitos) ou nulo")
     mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) - Nulo para plataformas")
     tipoUnidade: TipoUnidade = Field(..., description="Categoria da unidade conforme enum")
-    licencasAutorizadas: List[str] = Field(default_factory=list, description="Lista de licenças ativas com números, validade e observações")
+    licencasAutorizadas: List[str] = Field(default_factory=list, description="Número(s) da(s) licença(s) de autorização")
+    validade: Optional[str] = Field(None, description="Data de validade da licença (DD/MM/YYYY) ou N/A")
+    observacao: Optional[str] = Field(None, description="Observação sobre a licença ou renovação")
     disponibilidadeInicio: str = Field(..., description="Data/hora ISO 8601 UTC com Z")
     disponibilidadeFim: Optional[str] = Field(None, description="Data/hora ISO 8601 UTC com Z ou nulo")
 
@@ -35,6 +37,8 @@ class UnidadeMaritima(BaseModel):
                 "mmsi": "710001720",
                 "tipoUnidade": "EMBARCACAO_EMERGENCIA_APOIO",
                 "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
+                "validade": "N/A",
+                "observacao": None,
                 "disponibilidadeInicio": "2024-01-01T00:00:00Z",
                 "disponibilidadeFim": None
             }
