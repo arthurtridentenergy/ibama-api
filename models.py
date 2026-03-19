@@ -47,7 +47,8 @@ class UnidadeMaritima(BaseModel):
 
 class PosicaoAIS(BaseModel):
     """Modelo de posição geográfica conforme especificação IBAMA 1.4.2"""
-    mmsi: str = Field(..., description="Número MMSI (9 dígitos)")
+    mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) ou nulo para plataformas")
+    nome: Optional[str] = Field(None, description="Nome da unidade (para plataformas e Seastar Virtus)")
     latitude: float = Field(..., description="Coordenada de latitude em formato decimal")
     longitude: float = Field(..., description="Coordenada de longitude em formato decimal")
     timestampAquisicao: str = Field(..., description="Data/hora ISO 8601 UTC com Z")
@@ -56,6 +57,7 @@ class PosicaoAIS(BaseModel):
         schema_extra = {
             "example": {
                 "mmsi": "710001720",
+                "nome": "MAERSK VEGA",
                 "latitude": -23.5505,
                 "longitude": -46.6333,
                 "timestampAquisicao": "2026-03-12T14:30:00Z"

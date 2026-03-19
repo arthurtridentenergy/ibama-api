@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL CORRIGIDA
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL 2.3.0
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -7,11 +7,11 @@ import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-from fastapi import FastAPI, HTTPException, Form, Depends
+from fastapi import FastAPI, HTTPException, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import timedelta, datetime, timezone
-from typing import List
+from typing import List, Optional
 import os
 import jwt
 import json
@@ -50,7 +50,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_EMERGENCIA_APOIO,
         "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
         "validade": "N/A",
-        "observacao": None
+        "observacao": None,
+        "latitude": -23.5505,
+        "longitude": -46.6333
     },
     "710002450": {
         "nome": "Maersk Ventura",
@@ -59,7 +61,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
         "licencasAutorizadas": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"],
         "validade": "N/A",
-        "observacao": None
+        "observacao": None,
+        "latitude": -22.9068,
+        "longitude": -43.1729
     },
 
     # ===== SEASTAR VIRTUS =====
@@ -70,7 +74,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
         "licencasAutorizadas": ["Ofício nº 95/2026/Coprod/CGMac/Dilic"],
         "validade": "06/04/2026",
-        "observacao": None
+        "observacao": None,
+        "latitude": -23.2237,
+        "longitude": -44.2683
     },
     
     # ===== PLATAFORMAS (4) =====
@@ -81,7 +87,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "latitude": -27.8683,
+        "longitude": -48.3563
     },
     "PCE1": {
         "nome": "PCE-1",
@@ -90,7 +98,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "latitude": -27.7211,
+        "longitude": -48.3215
     },
     "P65": {
         "nome": "P65",
@@ -99,7 +109,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "latitude": -27.5689,
+        "longitude": -48.2954
     },
     "P08": {
         "nome": "P08",
@@ -108,7 +120,9 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA"
+        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "latitude": -27.6542,
+        "longitude": -48.3789
     }
 }
 
@@ -121,7 +135,7 @@ logger.info(f"[CONFIG] Ativos autorizados: {len(ATIVOS_AUTORIZADOS)} (2 vessels 
 app = FastAPI(
     title="IBAMA Location API",
     description="API de localização de embarcações e plataformas para o IBAMA/CGMAC",
-    version="2.2.0",
+    version="2.3.0",
     docs_url="/v1/docs",
     openapi_url="/v1/openapi.json"
 )
@@ -181,7 +195,7 @@ async def root():
     """Endpoint raiz da API"""
     return {
         "message": "IBAMA Location API",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "docs": "/v1/docs",
         "environment": ENVIRONMENT
     }
@@ -368,133 +382,213 @@ def _get_unidades_estaticas() -> List[UnidadeMaritima]:
     return unidades
 
 
-@app.get("/v1/posicao/{mmsi}", response_model=PosicaoAIS, tags=["Vessels"])
+@app.get("/v1/posicao", response_model=PosicaoAIS, tags=["Vessels"])
 async def get_posicao(
-    mmsi: str,
+    mmsi: Optional[str] = Query(None, description="Número MMSI (9 dígitos) - Opcional"),
+    nome: Optional[str] = Query(None, description="Nome da unidade (plataforma ou vessel) - Opcional"),
     client_id: str = Depends(get_current_client_id)
 ):
     """
-    Obtém a posição de uma embarcação pelo MMSI.
+    Obtém a posição de uma embarcação ou plataforma.
     
-    Apenas MMSIs autorizados Trident são aceitos:
-    - 710001720 (MAERSK VEGA)
-    - 710002450 (Maersk Ventura)
+    Parâmetros:
+    - mmsi: Número MMSI (para vessels com MMSI)
+    - nome: Nome da unidade (para plataformas e Seastar Virtus)
     
-    NOTA: Seastar Virtus e plataformas não possuem MMSI (retornarão 404)
+    Pelo menos um dos dois parâmetros deve ser fornecido e válido.
+    
+    Exemplos:
+    - GET /v1/posicao?mmsi=710001720 (MAERSK VEGA)
+    - GET /v1/posicao?nome=PPM-1 (Plataforma)
+    - GET /v1/posicao?nome=Seastar Virtus (Seastar Virtus)
     """
-    logger.info(f"[API] GET /v1/posicao/{mmsi} - Client: {client_id}")
+    logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}, Nome: {nome} - Client: {client_id}")
 
-    mmsi = normalizar_mmsi(mmsi)
+    # Normalizar MMSI se fornecido
+    if mmsi:
+        mmsi = normalizar_mmsi(mmsi)
 
-    # Validar se é um MMSI autorizado (apenas os 2 vessels com MMSI)
-    if mmsi not in ["710001720", "710002450"]:
-        logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "not_found",
-                "mmsi": mmsi,
-                "message": "MMSI não encontrado ou não autorizado"
-            }
-        )
+    # ===== Busca por MMSI =====
+    if mmsi and not nome:
+        logger.debug(f"[DEBUG] Buscando por MMSI: {mmsi}")
 
-    try:
-        headers = {
-            "Apikey": SPINERGIE_API_KEY,
-            "Accept": "application/json"
-        }
-
-        url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
-
-        logger.debug(f"[DEBUG] Buscando MMSI {mmsi} em: {url}")
-
-        response = requests.get(
-            url, headers=headers, timeout=60, verify=False
-        )
-
-        logger.debug(f"[DEBUG] Status Spinergie: {response.status_code}")
-
-        if response.status_code == 200:
-            vessels_data = response.json()
-
-            if not isinstance(vessels_data, list):
-                vessels_data = vessels_data.get("data", [])
-
-            logger.debug(f"[DEBUG] Total vessels: {len(vessels_data)}")
-
-            for vessel in vessels_data:
-                vessel_mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
-
-                logger.debug(f"[DEBUG] Comparando: {vessel_mmsi} == {mmsi} ?")
-
-                if vessel_mmsi == mmsi:
-                    latitude = vessel.get("latitude")
-                    longitude = vessel.get("longitude")
-                    datetime_ms = vessel.get("datetime", int(time.time() * 1000))
-
-                    datetime_obj = datetime.fromtimestamp(
-                        datetime_ms / 1000, tz=timezone.utc
-                    )
-
-                    logger.info(
-                        f"[SUCCESS] Posição encontrada MMSI {mmsi}: "
-                        f"lat={latitude}, lon={longitude}"
-                    )
-
-                    return PosicaoAIS(
-                        mmsi=mmsi,
-                        latitude=float(latitude) if latitude else 0.0,
-                        longitude=float(longitude) if longitude else 0.0,
-                        timestampAquisicao=datetime_obj.isoformat() + "Z"
-                    )
-
-            logger.warning(
-                f"[WARNING] MMSI {mmsi} autorizado mas não retornado "
-                f"pelo Spinergie"
-            )
+        # Validar se é um MMSI autorizado
+        if mmsi not in ["710001720", "710002450"]:
+            logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
             raise HTTPException(
                 status_code=404,
                 detail={
                     "error": "not_found",
                     "mmsi": mmsi,
-                    "message": "Embarcação autorizada mas sem posição disponível"
+                    "message": "MMSI não encontrado ou não autorizado"
                 }
             )
 
-        elif response.status_code == 401:
-            logger.error("[ERROR] Spinergie 401 - Apikey inválida")
-            raise HTTPException(
-                status_code=502,
-                detail={"error": "spinergie_auth_error"}
+        try:
+            headers = {
+                "Apikey": SPINERGIE_API_KEY,
+                "Accept": "application/json"
+            }
+
+            url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
+
+            logger.debug(f"[DEBUG] Buscando MMSI {mmsi} em: {url}")
+
+            response = requests.get(
+                url, headers=headers, timeout=60, verify=False
             )
 
-        else:
-            logger.error(
-                f"[ERROR] Spinergie Status {response.status_code}: "
-                f"{response.text[:200]}"
-            )
+            logger.debug(f"[DEBUG] Status Spinergie: {response.status_code}")
+
+            if response.status_code == 200:
+                vessels_data = response.json()
+
+                if not isinstance(vessels_data, list):
+                    vessels_data = vessels_data.get("data", [])
+
+                logger.debug(f"[DEBUG] Total vessels: {len(vessels_data)}")
+
+                for vessel in vessels_data:
+                    vessel_mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
+
+                    logger.debug(f"[DEBUG] Comparando: {vessel_mmsi} == {mmsi} ?")
+
+                    if vessel_mmsi == mmsi:
+                        latitude = vessel.get("latitude")
+                        longitude = vessel.get("longitude")
+                        datetime_ms = vessel.get("datetime", int(time.time() * 1000))
+
+                        datetime_obj = datetime.fromtimestamp(
+                            datetime_ms / 1000, tz=timezone.utc
+                        )
+
+                        # Buscar nome no dicionário autorizado
+                        nome_unidade = None
+                        for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+                            if dados.get("mmsi") == mmsi:
+                                nome_unidade = dados["nome"]
+                                break
+
+                        logger.info(
+                            f"[SUCCESS] Posição encontrada MMSI {mmsi}: "
+                            f"lat={latitude}, lon={longitude}"
+                        )
+
+                        return PosicaoAIS(
+                            mmsi=mmsi,
+                            nome=nome_unidade,
+                            latitude=float(latitude) if latitude else 0.0,
+                            longitude=float(longitude) if longitude else 0.0,
+                            timestampAquisicao=datetime_obj.isoformat() + "Z"
+                        )
+
+                logger.warning(
+                    f"[WARNING] MMSI {mmsi} autorizado mas não retornado "
+                    f"pelo Spinergie"
+                )
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "not_found",
+                        "mmsi": mmsi,
+                        "message": "Embarcação autorizada mas sem posição disponível"
+                    }
+                )
+
+            elif response.status_code == 401:
+                logger.error("[ERROR] Spinergie 401 - Apikey inválida")
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "spinergie_auth_error"}
+                )
+
+            else:
+                logger.error(
+                    f"[ERROR] Spinergie Status {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "spinergie_error"}
+                )
+
+        except requests.Timeout:
+            logger.error("[ERROR] Timeout ao chamar Spinergie")
+            raise HTTPException(status_code=504, detail={"error": "timeout"})
+        except requests.ConnectionError as e:
+            logger.error(f"[ERROR] Connection Error: {str(e)}")
+            raise HTTPException(status_code=503, detail={"error": "connection_error"})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"[ERROR] Exception inesperada: {str(e)}")
             raise HTTPException(
-                status_code=502,
-                detail={"error": "spinergie_error"}
+                status_code=500,
+                detail={"error": "internal_error"}
             )
 
-    except requests.Timeout:
-        logger.error("[ERROR] Timeout ao chamar Spinergie")
-        raise HTTPException(status_code=504, detail={"error": "timeout"})
-    except requests.ConnectionError as e:
-        logger.error(f"[ERROR] Connection Error: {str(e)}")
-        raise HTTPException(status_code=503, detail={"error": "connection_error"})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[ERROR] Exception inesperada: {str(e)}")
+    # ===== Busca por NOME =====
+    elif nome and not mmsi:
+        logger.debug(f"[DEBUG] Buscando por Nome: {nome}")
+
+        nome_normalizado = nome.strip().lower()
+
+        # Buscar nos ativos autorizados
+        for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+            if dados["nome"].lower() == nome_normalizado:
+                logger.info(f"[API] Encontrado: {dados['nome']}")
+
+                # Se tem dados de lat/lon no dicionário, usar
+                latitude = dados.get("latitude", 0.0)
+                longitude = dados.get("longitude", 0.0)
+
+                logger.info(
+                    f"[SUCCESS] Posição encontrada Nome {nome}: "
+                    f"lat={latitude}, lon={longitude}"
+                )
+
+                return PosicaoAIS(
+                    mmsi=dados.get("mmsi"),
+                    nome=dados["nome"],
+                    latitude=float(latitude),
+                    longitude=float(longitude),
+                    timestampAquisicao=datetime.now(timezone.utc).isoformat() + "Z"
+                )
+
+        logger.warning(f"[WARNING] Nome {nome} não encontrado ou não autorizado")
         raise HTTPException(
-            status_code=500,
-            detail={"error": "internal_error"}
+            status_code=404,
+            detail={
+                "error": "not_found",
+                "nome": nome,
+                "message": "Unidade não encontrada ou não autorizada"
+            }
+        )
+
+    # ===== Ambos preenchidos =====
+    elif mmsi and nome:
+        logger.warning(f"[WARNING] Ambos MMSI e Nome fornecidos")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "bad_request",
+                "message": "Forneça apenas MMSI OU nome, não ambos"
+            }
+        )
+
+    # ===== Nenhum preenchido =====
+    else:
+        logger.warning(f"[WARNING] Nenhum parâmetro válido fornecido")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "bad_request",
+                "message": "Forneça pelo menos um parâmetro: mmsi ou nome"
+            }
         )
 
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.2 ==========\n")
+    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.3.0 ==========\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
