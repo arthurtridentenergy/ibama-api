@@ -1,4 +1,4 @@
-# main.py — API IBAMA com FastAPI — VERSÃO FINAL 2.3.0
+# main.py — API IBAMA com FastAPI — VERSÃO FINAL 2.4.0
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -10,6 +10,8 @@ requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 from fastapi import FastAPI, HTTPException, Form, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from datetime import timedelta, datetime, timezone
 from typing import List, Optional
 import os
@@ -40,7 +42,7 @@ SPINERGIE_BASE_URL = os.getenv(
 SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
-# ✅ ATIVOS AUTORIZADOS — Conforme tabela IBAMA
+# ✅ ATIVOS AUTORIZADOS — Conforme tabela IBAMA + MMSIs para P08 e P65
 ATIVOS_AUTORIZADOS = {
     # ===== VESSELS (2) =====
     "710001720": {
@@ -79,7 +81,7 @@ ATIVOS_AUTORIZADOS = {
         "longitude": -44.2683
     },
     
-    # ===== PLATAFORMAS (4) =====
+    # ===== PLATAFORMAS (4) — COM MMSIs ADICIONADOS PARA P08 E P65 =====
     "PPM1": {
         "nome": "PPM-1",
         "imo": None,
@@ -105,7 +107,7 @@ ATIVOS_AUTORIZADOS = {
     "P65": {
         "nome": "P65",
         "imo": None,
-        "mmsi": None,
+        "mmsi": "538003593",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
@@ -116,7 +118,7 @@ ATIVOS_AUTORIZADOS = {
     "P08": {
         "nome": "P08",
         "imo": None,
-        "mmsi": None,
+        "mmsi": "538001903",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
         "validade": "11/07/2024",
@@ -135,10 +137,268 @@ logger.info(f"[CONFIG] Ativos autorizados: {len(ATIVOS_AUTORIZADOS)} (2 vessels 
 app = FastAPI(
     title="IBAMA Location API",
     description="API de localização de embarcações e plataformas para o IBAMA/CGMAC",
-    version="2.3.0",
+    version="2.4.0",
     docs_url="/v1/docs",
     openapi_url="/v1/openapi.json"
 )
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Segurança
+security = HTTPBearer()
+
+
+def normalizar_mmsi(mmsi_raw) -> str:
+    """Normaliza MMSI removendo casas decimais"""
+    try:
+        return str(int(float(str(mmsi_raw))))
+    except Exception:
+        return str(mmsi_raw).strip()
+
+
+def get_current_client_id(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
+    """Valida JWT token do header Authorization"""
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        client_id: str = payload.get("sub")
+
+        if client_id is None:
+            raise HTTPException(status_code=401, detail={"error": "invalid_token"})
+
+        logger.info(f"[API] Token validado para: {client_id}")
+        return client_id
+
+    except jwt.ExpiredSignatureError:
+        logger.warning("[API] Token expirado")
+        raise HTTPException(status_code=401, detail={"error": "token_expired"})
+    except jwt.InvalidTokenError as e:
+        logger.error(f"[API] Token inválido: {str(e)}")
+        raise HTTPException(status_code=401, detail={"error": "invalid_token"})
+    except Exception as e:
+        logger.error(f"[API] Erro ao validar token: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": "internal_error"})
+
+
+# CSS Customizado para Swagger UI (Trident Energy Design System)
+SWAGGER_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --te-green: #32AA46;
+  --header-blue: #283C50;
+  --header-border: #1f3041;
+  --logo-blue: #1e3a5f;
+  --logo-green: #4ade80;
+  --slate-850: #1e293b;
+  --slate-950: #020617;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+  color: #1e293b;
+}
+
+.swagger-ui .topbar {
+  background: var(--header-blue) !important;
+  border-bottom: 1px solid var(--header-border) !important;
+}
+
+.swagger-ui .topbar-wrapper {
+  background: var(--header-blue) !important;
+}
+
+.swagger-ui .topbar .topbar-wrapper img {
+  filter: brightness(0) invert(1); /* Branco para logo */
+}
+
+.swagger-ui .topbar .topbar-wrapper .link {
+  color: white !important;
+  font-weight: 500;
+}
+
+.swagger-ui .topbar .topbar-wrapper .download-url-wrapper {
+  display: none; /* Esconde download se não necessário */
+}
+
+.swagger-ui .info {
+  margin: 50px 0 60px 0;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 40px;
+  font-family: 'Inter', sans-serif;
+}
+
+.swagger-ui .info hgroup h4 {
+  color: var(--header-blue) !important;
+  font-weight: 700;
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+
+.swagger-ui .info hgroup p {
+  color: #64748b;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.swagger-ui .opblock-tag-section .opblock-tag {
+  background: var(--te-green) !important;
+  color: white !important;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 14px;
+}
+
+.swagger-ui .opblock .opblock-summary-path-description-wrapper {
+  border-color: #e2e8f0 !important;
+  background: white !important;
+}
+
+.swagger-ui .opblock .opblock-summary {
+  border-color: #e2e8f0 !important;
+  background: white !important;
+}
+
+.swagger-ui .opblock .opblock-summary .opblock-summary-method {
+  background: var(--te-green) !important;
+  color: white !important;
+  border-radius: 6px;
+}
+
+.swagger-ui .opblock .opblock-summary .opblock-summary-path {
+  color: var(--header-blue) !important;
+  font-weight: 600;
+}
+
+.swagger-ui .opblock .opblock-summary .opblock-summary-description {
+  color: #64748b !important;
+}
+
+.swagger-ui .parameter__name {
+  font-weight: 600;
+  color: var(--header-blue);
+}
+
+.swagger-ui .parameter__type {
+  color: var(--te-green);
+  font-weight: 500;
+}
+
+.swagger-ui .execute-wrapper .execute-wrapper__body {
+  background: white !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 8px;
+}
+
+.swagger-ui .btn {
+  background: var(--te-green) !important;
+  border: none !important;
+  color: white !important;
+  border-radius: 8px !important;
+  font-weight: 500 !important;
+  transition: all 0.2s !important;
+}
+
+.swagger-ui .btn:hover {
+  background: #2d9a3e !important;
+  transform: translateY(-1px) !important;
+}
+
+.swagger-ui .btn-group .btn {
+  border-radius: 6px !important;
+  margin-right: 8px !important;
+}
+
+.swagger-ui .response-col_status {
+  background: #f0fdf4 !important;
+  color: #166534 !important;
+  border: 1px solid #bbf7d0 !important;
+}
+
+.swagger-ui .response-col_description {
+  background: white !important;
+  border: 1px solid #e2e8f0 !important;
+}
+
+/* Dark mode toggle (opcional) */
+.swagger-ui .scheme-container {
+  background: var(--header-blue) !important;
+}
+
+.swagger-ui .expand-operation {
+  color: var(--te-green) !important;
+}
+
+/* Focus rings Trident style */
+.swagger-ui *:focus {
+  outline: none !important;
+  box-shadow: 0 0 0 3px rgba(50, 170, 70, 0.2) !important;
+}
+"""
+
+# Função para OpenAPI customizada (não muda)
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="IBAMA Location API",
+        version="2.4.0",
+        description="API de localização de embarcações e plataformas para o IBAMA/CGMAC",
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+# Função para HTML do Swagger UI customizada
+def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url="/v1/openapi.json",
+        title="IBAMA API — Trident Energy",
+        css_url=SWAGGER_CSS,  # CSS customizado Trident Design System
+        swagger_js_url="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css",
+        oauth2_redirect_url="/docs/oauth2-redirect.html",
+    )
+
+
+# Inicialização FastAPI com customizações
+app = FastAPI(
+    title="IBAMA Location API",
+    description="API de localização de embarcações e plataformas para o IBAMA/CGMAC",
+    version="2.4.0",
+    docs_url="/v1/docs",
+    openapi_url="/v1/openapi.json",
+    openapi_tags=[
+        {
+            "name": "Vessels",
+            "description": "Endpoints para unidades marítimas e posições"
+        },
+        {
+            "name": "Auth",
+            "description": "Autenticação OAuth 2.0"
+        }
+    ]
+)
+
+# Substituir endpoints padrão do Swagger com customizações
+app.openapi = custom_openapi
+app.get("/v1/docs")(custom_swagger_ui_html)
 
 # CORS
 app.add_middleware(
@@ -195,7 +455,7 @@ async def root():
     """Endpoint raiz da API"""
     return {
         "message": "IBAMA Location API",
-        "version": "2.3.0",
+        "version": "2.4.0",
         "docs": "/v1/docs",
         "environment": ENVIRONMENT
     }
@@ -401,6 +661,8 @@ async def get_posicao(
     - GET /v1/posicao?mmsi=710001720 (MAERSK VEGA)
     - GET /v1/posicao?nome=PPM-1 (Plataforma)
     - GET /v1/posicao?nome=Seastar Virtus (Seastar Virtus)
+    - GET /v1/posicao?mmsi=538001903 (P08)
+    - GET /v1/posicao?mmsi=538003593 (P65)
     """
     logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}, Nome: {nome} - Client: {client_id}")
 
@@ -412,8 +674,8 @@ async def get_posicao(
     if mmsi and not nome:
         logger.debug(f"[DEBUG] Buscando por MMSI: {mmsi}")
 
-        # Validar se é um MMSI autorizado
-        if mmsi not in ["710001720", "710002450"]:
+        # Validar se é um MMSI autorizado (vessels + plataformas com MMSI)
+        if mmsi not in ["710001720", "710002450", "538001903", "538003593"]:
             logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
             raise HTTPException(
                 status_code=404,
@@ -491,7 +753,7 @@ async def get_posicao(
                     detail={
                         "error": "not_found",
                         "mmsi": mmsi,
-                        "message": "Embarcação autorizada mas sem posição disponível"
+                        "message": "Unidade autorizada mas sem posição disponível"
                     }
                 )
 
@@ -590,5 +852,5 @@ async def get_posicao(
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.3.0 ==========\n")
+    logger.info("\n[INFO] ========== INICIANDO API IBAMA 2.4.0 ==========\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)
