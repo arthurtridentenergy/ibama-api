@@ -670,29 +670,37 @@ async def get_posicao(
     if mmsi:
         mmsi = normalizar_mmsi(mmsi)
 
-    # ===== Busca por MMSI =====
-  # ===== Busca por MMSI =====
-    if mmsi and not nome:
-        logger.debug(f"Consultando posição para MMSI: {mmsi}")
-        # Normalizar MMSI se fornecido
-        mmsi = normalizar_mmsi(mmsi)
-        
-        # Extrair TODOS os MMSIs autorizados dinamicamente
-        mmsis_autorizados = {
-            ativo.get("mmsi"): (ativo_id, ativo) 
-            for ativo_id, ativo in ATIVOS_AUTORIZADOS.items() 
-            if ativo.get("mmsi")
-        }
-        
-        # Validar se é um MMSI autorizado
-        if mmsi not in mmsis_autorizados:
-            logger.warning(f"MMSI não autorizado: {mmsi}")
-            raise HTTPException(
-                status_code=404,
-                detail=f"Unidade com MMSI '{mmsi}' não encontrada ou não autorizada."
+        # ===== Busca por MMSI =====
+        if mmsi and not nome:
+            mmsi = normalizar_mmsi(mmsi)
+            logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}")
+            
+            # Mapeamento dinâmico de MMSI para dados estáticos
+            unidade_encontrada = None
+            for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+                if dados.get("mmsi") == mmsi:
+                    unidade_encontrada = dados
+                    break
+            
+            if not unidade_encontrada:
+                logger.warning(f"[API] MMSI não autorizado: {mmsi}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Unidade com MMSI '{mmsi}' não encontrada ou não autorizada."
+                )
+            
+            # Retorna dados estáticos (latitude/longitude do dicionário)
+            latitude = unidade_encontrada.get("latitude", 0.0)
+            longitude = unidade_encontrada.get("longitude", 0.0)
+            
+            logger.info(f"[API] Posição retornada para {unidade_encontrada['nome']} (MMSI: {mmsi})")
+            return PosicaoAIS(
+                latitude=latitude,
+                longitude=longitude,
+                datetime=datetime.now(timezone.utc).isoformat() + "Z",
+                mmsi=mmsi,
+                nome=unidade_encontrada["nome"]
             )
-        
-        ativo_id, dados_ativo = mmsis_autorizados[mmsi]
 
         try:
             headers = {
