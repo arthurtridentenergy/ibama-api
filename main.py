@@ -671,20 +671,28 @@ async def get_posicao(
         mmsi = normalizar_mmsi(mmsi)
 
     # ===== Busca por MMSI =====
+  # ===== Busca por MMSI =====
     if mmsi and not nome:
-        logger.debug(f"[DEBUG] Buscando por MMSI: {mmsi}")
-
-        # Validar se é um MMSI autorizado (vessels + plataformas com MMSI)
-        if mmsi not in ["710001720", "710002450", "538001903", "538003593"]:
-            logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
+        logger.debug(f"Consultando posição para MMSI: {mmsi}")
+        # Normalizar MMSI se fornecido
+        mmsi = normalizar_mmsi(mmsi)
+        
+        # Extrair TODOS os MMSIs autorizados dinamicamente
+        mmsis_autorizados = {
+            ativo.get("mmsi"): (ativo_id, ativo) 
+            for ativo_id, ativo in ATIVOS_AUTORIZADOS.items() 
+            if ativo.get("mmsi")
+        }
+        
+        # Validar se é um MMSI autorizado
+        if mmsi not in mmsis_autorizados:
+            logger.warning(f"MMSI não autorizado: {mmsi}")
             raise HTTPException(
                 status_code=404,
-                detail={
-                    "error": "not_found",
-                    "mmsi": mmsi,
-                    "message": "MMSI não encontrado ou não autorizado"
-                }
+                detail=f"Unidade com MMSI '{mmsi}' não encontrada ou não autorizada."
             )
+        
+        ativo_id, dados_ativo = mmsis_autorizados[mmsi]
 
         try:
             headers = {
