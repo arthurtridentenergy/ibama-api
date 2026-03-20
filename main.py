@@ -670,37 +670,84 @@ async def get_posicao(
     if mmsi:
         mmsi = normalizar_mmsi(mmsi)
 
-        # ===== Busca por MMSI =====
+   # ===== Busca por MMSI =====
         if mmsi and not nome:
             mmsi = normalizar_mmsi(mmsi)
             logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}")
             
-            # Mapeamento dinâmico de MMSI para dados estáticos
-            unidade_encontrada = None
-            for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
-                if dados.get("mmsi") == mmsi:
-                    unidade_encontrada = dados
-                    break
+            # MMSIs especiais das plataformas (retornar estáticos diretamente)
+            mmsis_plataformas = ["538003593", "538001903"]  # P65 e P08
             
-            if not unidade_encontrada:
-                logger.warning(f"[API] MMSI não autorizado: {mmsi}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Unidade com MMSI '{mmsi}' não encontrada ou não autorizada."
-                )
+            if mmsi in mmsis_plataformas:
+                # Busca direta no dicionário (igual busca por nome)
+                unidade_encontrada = None
+                for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+                    if dados.get("mmsi") == mmsi:
+                        unidade_encontrada = dados
+                        break
+                
+                if unidade_encontrada:
+                    latitude = unidade_encontrada.get("latitude", 0.0)
+                    longitude = unidade_encontrada.get("longitude", 0.0)
+                    logger.info(f"[API] Plataforma encontrada por MMSI: {unidade_encontrada['nome']}")
+                    return PosicaoAIS(
+                        latitude=latitude,
+                        longitude=longitude,
+                        datetime=datetime.now(timezone.utc).isoformat() + "Z",
+                        mmsi=mmsi,
+                        nome=unidade_encontrada["nome"]
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail=f"Plataforma MMSI '{mmsi}' não encontrada.")
             
-            # Retorna dados estáticos (latitude/longitude do dicionário)
-            latitude = unidade_encontrada.get("latitude", 0.0)
-            longitude = unidade_encontrada.get("longitude", 0.0)
-            
-            logger.info(f"[API] Posição retornada para {unidade_encontrada['nome']} (MMSI: {mmsi})")
-            return PosicaoAIS(
-                latitude=latitude,
-                longitude=longitude,
-                datetime=datetime.now(timezone.utc).isoformat() + "Z",
-                mmsi=mmsi,
-                nome=unidade_encontrada["nome"]
-            )
+            # Para outros MMSIs (vessels), tenta Spinergie
+            else:
+                # Validar se autorizado
+                mmsis_autorizados = {ativo.get("mmsi"): ativo for ativo in ATIVOS_AUTORIZADOS.values() if ativo.get("mmsi")}
+                if mmsi not in mmsis_autorizados:
+                    raise HTTPException(status_code=404, detail=f"MMSI '{mmsi}' não autorizado.")
+                
+                try:
+                    headers = {"Apikey": SPINERGIE_API_KEY, "Accept": "application/json"}
+                    url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
+                    response = requests.get(url, headers=headers, timeout=10, verify=False)
+                    
+                    if response.status_code == 200:
+                        vessels_data = response.json()
+                        if isinstance(vessels_data, list):
+                            for vessel in vessels_data:
+                                vessel_mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
+                                if vessel_mmsi == mmsi:
+                                    return PosicaoAIS(
+                                        latitude=vessel.get("latitude"),
+                                        longitude=vessel.get("longitude"),
+                                        datetime=datetime.fromtimestamp(vessel.get("datetime", 0)/1000, timezone.utc).isoformat() + "Z",
+                                        mmsi=mmsi,
+                                        nome=mmsis_autorizados[mmsi]["nome"]
+                                    )
+                    
+                    # Fallback para estáticos se Spinergie falhar/não encontrar
+                    dados = mmsis_autorizados[mmsi]
+                    logger.warning(f"Spinergie sem dados para MMSI {mmsi}, usando estáticos")
+                    return PosicaoAIS(
+                        latitude=dados.get("latitude", 0.0),
+                        longitude=dados.get("longitude", 0.0),
+                        datetime=datetime.now(timezone.utc).isoformat() + "Z",
+                        mmsi=mmsi,
+                        nome=dados["nome"]
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Erro Spinergie MMSI {mmsi}: {e}")
+                    # Fallback final: estáticos
+                    dados = mmsis_autorizados[mmsi]
+                    return PosicaoAIS(
+                        latitude=dados.get("latitude", 0.0),
+                        longitude=dados.get("longitude", 0.0),
+                        datetime=datetime.now(timezone.utc).isoformat() + "Z",
+                        mmsi=mmsi,
+                        nome=dados["nome"]
+                    )
 
         try:
             headers = {
