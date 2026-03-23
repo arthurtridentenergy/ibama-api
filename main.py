@@ -650,13 +650,13 @@ async def get_posicao(
 ):
     """
     Obtém a posição de uma embarcação ou plataforma.
-    
+
     Parâmetros:
     - mmsi: Número MMSI (para vessels com MMSI)
     - nome: Nome da unidade (para plataformas e Seastar Virtus)
-    
+
     Pelo menos um dos dois parâmetros deve ser fornecido e válido.
-    
+
     Exemplos:
     - GET /v1/posicao?mmsi=710001720 (MAERSK VEGA)
     - GET /v1/posicao?nome=PPM-1 (Plataforma)
@@ -666,17 +666,36 @@ async def get_posicao(
     """
     logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}, Nome: {nome} - Client: {client_id}")
 
+    nome_convertido_do_mmsi = False
+
     # Normalizar MMSI se fornecido
     if mmsi:
         mmsi = normalizar_mmsi(mmsi)
 
+        # Conversão especial:
+        # P65 e P08 devem ser buscados no Spinergie pelo NOME
+        if mmsi == "538003593":
+            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P65 - Client: {client_id}")
+            nome = "P65"
+            mmsi = None
+            nome_convertido_do_mmsi = True
+
+        elif mmsi == "538001903":
+            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P08 - Client: {client_id}")
+            nome = "P08"
+            mmsi = None
+            nome_convertido_do_mmsi = True
+
     # ===== Busca por MMSI =====
     if mmsi and not nome:
+
         logger.debug(f"[DEBUG] Buscando por MMSI: {mmsi}")
 
         # Validar se é um MMSI autorizado (vessels + plataformas com MMSI)
         if mmsi not in ["710001720", "710002450", "538001903", "538003593"]:
+
             logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
+
             raise HTTPException(
                 status_code=404,
                 detail={
@@ -687,6 +706,7 @@ async def get_posicao(
             )
 
         try:
+
             headers = {
                 "Apikey": SPINERGIE_API_KEY,
                 "Accept": "application/json"
@@ -703,6 +723,7 @@ async def get_posicao(
             logger.debug(f"[DEBUG] Status Spinergie: {response.status_code}")
 
             if response.status_code == 200:
+
                 vessels_data = response.json()
 
                 if not isinstance(vessels_data, list):
@@ -711,15 +732,16 @@ async def get_posicao(
                 logger.debug(f"[DEBUG] Total vessels: {len(vessels_data)}")
 
                 for vessel in vessels_data:
+
                     vessel_mmsi = normalizar_mmsi(vessel.get("mmsi", ""))
 
                     logger.debug(f"[DEBUG] Comparando: {vessel_mmsi} == {mmsi} ?")
 
                     if vessel_mmsi == mmsi:
+
                         latitude = vessel.get("latitude")
                         longitude = vessel.get("longitude")
                         datetime_ms = vessel.get("datetime", int(time.time() * 1000))
-
                         datetime_obj = datetime.fromtimestamp(
                             datetime_ms / 1000, tz=timezone.utc
                         )
@@ -748,6 +770,7 @@ async def get_posicao(
                     f"[WARNING] MMSI {mmsi} autorizado mas não retornado "
                     f"pelo Spinergie"
                 )
+
                 raise HTTPException(
                     status_code=404,
                     detail={
@@ -758,32 +781,45 @@ async def get_posicao(
                 )
 
             elif response.status_code == 401:
+
                 logger.error("[ERROR] Spinergie 401 - Apikey inválida")
+
                 raise HTTPException(
                     status_code=502,
                     detail={"error": "spinergie_auth_error"}
                 )
 
             else:
+
                 logger.error(
                     f"[ERROR] Spinergie Status {response.status_code}: "
                     f"{response.text[:200]}"
                 )
+
                 raise HTTPException(
                     status_code=502,
                     detail={"error": "spinergie_error"}
                 )
 
         except requests.Timeout:
+
             logger.error("[ERROR] Timeout ao chamar Spinergie")
+
             raise HTTPException(status_code=504, detail={"error": "timeout"})
+
         except requests.ConnectionError as e:
+
             logger.error(f"[ERROR] Connection Error: {str(e)}")
+
             raise HTTPException(status_code=503, detail={"error": "connection_error"})
+
         except HTTPException:
             raise
+
         except Exception as e:
+
             logger.error(f"[ERROR] Exception inesperada: {str(e)}")
+
             raise HTTPException(
                 status_code=500,
                 detail={"error": "internal_error"}
@@ -791,16 +827,97 @@ async def get_posicao(
 
     # ===== Busca por NOME =====
     elif nome and not mmsi:
+
         logger.debug(f"[DEBUG] Buscando por Nome: {nome}")
 
         nome_normalizado = nome.strip().lower()
 
-        # Buscar nos ativos autorizados
+        # Se o nome veio de uma conversão de MMSI (P08/P65),
+        # tenta primeiro buscar no Spinergie por nome.
+        if nome_convertido_do_mmsi:
+
+            try:
+                headers = {
+                    "Apikey": SPINERGIE_API_KEY,
+                    "Accept": "application/json"
+                }
+
+                url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
+
+                logger.debug(f"[DEBUG] Buscando nome convertido {nome} no Spinergie em: {url}")
+
+                response = requests.get(
+                    url, headers=headers, timeout=60, verify=False
+                )
+
+                logger.debug(f"[DEBUG] Status Spinergie (busca por nome convertido): {response.status_code}")
+
+                if response.status_code == 200:
+
+                    vessels_data = response.json()
+
+                    if not isinstance(vessels_data, list):
+                        vessels_data = vessels_data.get("data", [])
+
+                    logger.debug(f"[DEBUG] Total vessels: {len(vessels_data)}")
+
+                    for vessel in vessels_data:
+                        vessel_nome = str(
+                            vessel.get("name")
+                            or vessel.get("nome")
+                            or vessel.get("vesselName")
+                            or vessel.get("vessel_name")
+                            or ""
+                        ).strip().lower()
+
+                        logger.debug(f"[DEBUG] Comparando nome: {vessel_nome} == {nome_normalizado} ?")
+
+                        if vessel_nome == nome_normalizado:
+
+                            latitude = vessel.get("latitude")
+                            longitude = vessel.get("longitude")
+                            datetime_ms = vessel.get("datetime", int(time.time() * 1000))
+                            datetime_obj = datetime.fromtimestamp(
+                                datetime_ms / 1000, tz=timezone.utc
+                            )
+
+                            logger.info(
+                                f"[SUCCESS] Posição encontrada por nome convertido {nome}: "
+                                f"lat={latitude}, lon={longitude}"
+                            )
+
+                            # Busca dados do ativo autorizado para complementar o retorno
+                            for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+                                if dados["nome"].lower() == nome_normalizado:
+                                    return PosicaoAIS(
+                                        mmsi=dados.get("mmsi"),
+                                        nome=dados["nome"],
+                                        latitude=float(latitude) if latitude else float(dados.get("latitude", 0.0)),
+                                        longitude=float(longitude) if longitude else float(dados.get("longitude", 0.0)),
+                                        timestampAquisicao=datetime_obj.isoformat() + "Z"
+                                    )
+
+                logger.warning(
+                    f"[WARNING] Nome convertido {nome} não encontrado no Spinergie. "
+                    f"Usando fallback estático."
+                )
+
+            except requests.Timeout:
+                logger.error(f"[ERROR] Timeout ao chamar Spinergie para nome convertido {nome}. Usando fallback estático.")
+
+            except requests.ConnectionError as e:
+                logger.error(f"[ERROR] Connection Error ao buscar nome convertido {nome}: {str(e)}. Usando fallback estático.")
+
+            except Exception as e:
+                logger.error(f"[ERROR] Exception inesperada na busca por nome convertido {nome}: {str(e)}. Usando fallback estático.")
+
+        # Buscar nos ativos autorizados (fluxo original mantido)
         for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+
             if dados["nome"].lower() == nome_normalizado:
+
                 logger.info(f"[API] Encontrado: {dados['nome']}")
 
-                # Se tem dados de lat/lon no dicionário, usar
                 latitude = dados.get("latitude", 0.0)
                 longitude = dados.get("longitude", 0.0)
 
@@ -818,6 +935,7 @@ async def get_posicao(
                 )
 
         logger.warning(f"[WARNING] Nome {nome} não encontrado ou não autorizado")
+
         raise HTTPException(
             status_code=404,
             detail={
@@ -829,7 +947,9 @@ async def get_posicao(
 
     # ===== Ambos preenchidos =====
     elif mmsi and nome:
+
         logger.warning(f"[WARNING] Ambos MMSI e Nome fornecidos")
+
         raise HTTPException(
             status_code=400,
             detail={
@@ -840,7 +960,9 @@ async def get_posicao(
 
     # ===== Nenhum preenchido =====
     else:
+
         logger.warning(f"[WARNING] Nenhum parâmetro válido fornecido")
+
         raise HTTPException(
             status_code=400,
             detail={
