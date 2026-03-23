@@ -674,75 +674,84 @@ async def get_posicao(
         # ===== Busca por MMSI =====
         if mmsi and not nome:
             mmsi = normalizar_mmsi(mmsi)
-            logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}")
+            logger.info(f"[API] MMSI: {mmsi}")
             
-            # Validar se MMSI autorizado
-            if mmsi not in [d.get("mmsi") for d in ATIVOS_AUTORIZADOS.values() if d.get("mmsi")]:
-                raise HTTPException(status_code=404, detail=f"MMSI '{mmsi}' não autorizado.")
-            
-            # P65/P08: retornar estáticos (igual busca por nome)
-            mmsi_para_nome = {"538003593": "P65", "538001903": "P08"}
-            nome_plataforma = mmsi_para_nome.get(mmsi)
-            
-            if nome_plataforma:
-                # Plataformas: usar dados estáticos (como no antigo)
-                for dados in ATIVOS_AUTORIZADOS.values():
-                    if dados.get("nome") == nome_plataforma:
-                        logger.info(f"[API] P{nome_plataforma[-2:]} estático encontrado")
+            # MMSI P08/P65 → MESMA lógica de NOME (estática, funciona!)
+            if mmsi in ["538001903", "538003593"]:
+                nome_equivalente = "P08" if mmsi == "538001903" else "P65"
+                logger.info(f"[API] MMSI {mmsi} → nome '{nome_equivalente}' (lógica nome)")
+                nome_normalizado = nome_equivalente.strip().lower()
+                for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
+                    if dados["nome"].lower() == nome_normalizado:
+                        latitude = dados.get("latitude", 0.0)
+                        longitude = dados.get("longitude", 0.0)
+                        logger.info(f"[API] Encontrado {dados['nome']} (estático)")
                         return PosicaoAIS(
-                            latitude=dados.get("latitude", 0.0),
-                            longitude=dados.get("longitude", 0.0),
+                            latitude=latitude,
+                            longitude=longitude,
                             datetime=datetime.now(timezone.utc).isoformat() + "Z",
                             mmsi=mmsi,
-                            nome=nome_plataforma
+                            nome=dados["nome"]
                         )
-                raise HTTPException(status_code=404, detail=f"Plataforma '{nome_plataforma}' não encontrada.")
+                raise HTTPException(status_code=404, detail=f"Plataforma MMSI {mmsi} não encontrada.")
             
-            # Outros MMSI: chamar Spinergie vessel (como antigo)
+            # Outros MMSI (vessels): Spinergie SEGURO
+            mmsis_autorizados = [d.get("mmsi") for d in ATIVOS_AUTORIZADOS.values() if d.get("mmsi")]
+            if mmsi not in mmsis_autorizados:
+                raise HTTPException(status_code=404, detail=f"MMSI '{mmsi}' não autorizado.")
+            
             headers = {"Apikey": SPINERGIE_API_KEY, "Accept": "application/json"}
             url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
-            logger.info(f"[Spinergie Vessel] MMSI {mmsi}")
             
+            logger.info(f"[Spinergie] MMSI {mmsi} | URL: {url} | Key carregada: {'✅' if SPINERGIE_API_KEY else '❌'}")
             try:
                 response = requests.get(url, headers=headers, timeout=10, verify=False)
+                logger.info(f"[Spinergie] Status: {response.status_code} | Content-Type: {response.headers.get('content-type')} | Preview: {response.text[:200]}")
                 
-                if response.status_code == 200:
-                    vessels_data = response.json()
-                    if not isinstance(vessels_data, list):
-                        vessels_data = vessels_data.get("data", [])
-                    
-                    for vessel in vessels_data:
-                        if normalizar_mmsi(vessel.get("mmsi", "")) == mmsi:
-                            datetime_ms = vessel.get("datetime", int(time.time() * 1000))
-                            datetime_obj = datetime.fromtimestamp(datetime_ms / 1000, timezone.utc)
-                            
-                            # Buscar nome no dicionário
-                            nome_unidade = None
-                            for ativo_id, dados in ATIVOS_AUTORIZADOS.items():
-                                if dados.get("mmsi") == mmsi:
-                                    nome_unidade = dados["nome"]
-                                    break
-                            
-                            logger.info(f"[API] Vessel {mmsi} encontrado!")
+                if response.status_code != 200:
+                    logger.warning(f"[Spinergie] HTTP {response.status_code}: {response.text[:100]}")
+                    raise HTTPException(status_code=response.status_code, detail=f"Spinergie erro HTTP {response.status_code}.")
+                
+                try:
+                    data = response.json()
+                except json.JSONDecodeError as e:
+                    logger.error(f"[Spinergie] JSON inválido: {response.text[:300]} | Erro: {e}")
+                    raise HTTPException(status_code=502, detail="Resposta Spinergie não-JSON.")
+                
+                vessels = data if isinstance(data, list) else data.get("data", [])
+                logger.info(f"[Spinergie] {len(vessels)} vessels recebidos")
+                
+                for vessel in vessels:
+                    if isinstance(vessel, dict):
+                        v_mmsi = normalizar_mmsi(str(vessel.get("mmsi", "")))
+                        logger.debug(f"[Spinergie] Vessel MMSI: {v_mmsi}")
+                        if v_mmsi == mmsi:
+                            lat = vessel.get("latitude", 0.0)
+                            lon = vessel.get("longitude", 0.0)
+                            ts = vessel.get("datetime", 0)
+                            dt = datetime.fromtimestamp(ts / 1000, timezone.utc) if ts else datetime.now(timezone.utc)
+                            nome_vessel = vessel.get("name", f"Vessel {mmsi}")
+                            logger.info(f"[API] Vessel {mmsi} encontrado: lat={lat}, lon={lon}")
                             return PosicaoAIS(
-                                latitude=vessel.get("latitude", 0.0),
-                                longitude=vessel.get("longitude", 0.0),
-                                datetime=datetime_obj.isoformat() + "Z",
+                                latitude=lat,
+                                longitude=lon,
+                                datetime=dt.isoformat() + "Z",
                                 mmsi=mmsi,
-                                nome=nome_unidade or f"Vessel {mmsi}"
+                                nome=nome_vessel
                             )
                 
-                raise HTTPException(status_code=404, detail="MMSI autorizado mas sem posição disponível no Spinergie.")
+                logger.warning(f"[API] MMSI {mmsi} não encontrado em {len(vessels)} vessels")
+                raise HTTPException(status_code=404, detail="MMSI autorizado mas sem posição no Spinergie.")
                 
             except requests.exceptions.Timeout:
+                logger.error("[Spinergie] Timeout")
                 raise HTTPException(status_code=504, detail="Timeout Spinergie.")
             except requests.exceptions.ConnectionError:
-                raise HTTPException(status_code=503, detail="Spinergie indisponível.")
-            except HTTPException:
-                raise
+                logger.error("[Spinergie] Sem conexão")
+                raise HTTPException(status_code=503, detail="Sem conexão Spinergie.")
             except Exception as e:
-                logger.error(f"[Spinergie] Erro MMSI {mmsi}: {e}")
-                raise HTTPException(status_code=500, detail="Erro interno consulta Spinergie.")
+                logger.error(f"[Spinergie ERRO] MMSI {mmsi}: {str(e)} | Traceback:\n{traceback.format_exc()}")
+                raise HTTPException(status_code=500, detail="Erro interno Spinergie.")
 
     # ===== Busca por NOME =====
     elif nome and not mmsi:
