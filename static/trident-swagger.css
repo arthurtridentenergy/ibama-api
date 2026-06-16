@@ -1,0 +1,195 @@
+:root {
+  --te-green: #32AA46;
+  --header-blue: #283C50;
+  --header-border: #1f3041;
+  --logo-blue: #1e3a5f;
+  --logo-green: #4ade80;
+  --page-bg: #f8fafc;
+  --card-bg: #ffffff;
+  --text-main: #1e293b;
+  --text-soft: #64748b;
+  --border-light: #e2e8f0;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--page-bg);
+  color: var(--text-main);
+  font-family: Inter, Arial, sans-serif;
+}
+
+.trident-docs-header {
+  background: var(--header-blue);
+  border-bottom: 1px solid var(--header-border);
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.trident-docs-header img {
+  height: 34px;
+  width: auto;
+  display: block;
+}
+
+.trident-docs-title {
+  color: white;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.swagger-ui {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.swagger-ui .topbar {
+  display: none;
+}
+
+.swagger-ui .info {
+  margin: 0 0 24px 0;
+  padding: 24px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
+
+.swagger-ui .info .title {
+  color: var(--header-blue);
+  font-weight: 700;
+}
+
+.swagger-ui .scheme-container {
+  background: var(--card-bg);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  box-shadow: none;
+  padding: 12px 16px;
+  margin: 0 0 20px 0;
+}
+
+.swagger-ui .opblock-tag {
+  background: var(--card-bg);
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+
+.swagger-ui .opblock-tag:hover {
+  background: #f8fafc;
+}
+
+.swagger-ui .opblock-tag-section h3.opblock-tag {
+  color: var(--header-blue);
+  font-weight: 700;
+}
+
+.swagger-ui .opblock {
+  border-radius: 12px;
+  overflow: hidden;
+  border-width: 1px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+
+.swagger-ui .opblock .opblock-summary {
+  padding: 10px 14px;
+}
+
+.swagger-ui .opblock .opblock-summary-method {
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.swagger-ui .btn.execute {
+  background: var(--te-green);
+  border-color: var(--te-green);
+  color: white;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.swagger-ui .btn.execute:hover {
+  filter: brightness(0.95);
+}
+
+.swagger-ui .btn.authorize {
+  background: var(--header-blue);
+  border-color: var(--header-blue);
+  color: white;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.swagger-ui .btn.authorize:hover {
+  filter: brightness(1.05);
+}
+
+.swagger-ui input,
+.swagger-ui select,
+.swagger-ui textarea {
+  border-radius: 10px !important;
+  border: 1px solid var(--border-light) !important;
+}
+
+.swagger-ui input:focus,
+.swagger-ui select:focus,
+.swagger-ui textarea:focus {
+  outline: none !important;
+  border-color: var(--te-green) !important;
+  box-shadow: 0 0 0 3px rgba(50, 170, 70, 0.15) !important;
+}
+
+.swagger-ui .responses-inner,
+.swagger-ui .opblock-section-header,
+.swagger-ui .opblock-description-wrapper,
+.swagger-ui .opblock-external-docs-wrapper,
+.swagger-ui .opblock-title_normal {
+  background: var(--card-bg);
+}
+
+.swagger-ui table tbody tr td,
+.swagger-ui table thead tr th {
+  border-color: var(--border-light);
+}
+
+.swagger-ui .model-box,
+.swagger-ui .highlight-code {
+  border-radius: 10px;
+}
+
+.swagger-ui .markdown p,
+.swagger-ui .markdown li,
+.swagger-ui .renderedMarkdown p,
+.swagger-ui .renderedMarkdown li {
+  color: var(--text-main);
+}
+
+.swagger-ui .response-col_status {
+  font-weight: 700;
+}
+
+.swagger-ui .tab li button.tablinks {
+  font-weight: 600;
+}
+
+.swagger-ui .opblock.opblock-get {
+  border-color: #60a5fa;
+}
+
+.swagger-ui .opblock.opblock-post {
+  border-color: var(--te-green);
+}
+
+.swagger-ui .opblock.opblock-put {
+  border-color: #f59e0b;
+}
+
+.swagger-ui .opblock.opblock-delete {
+  border-color: #ef4444;
+}

@@ -8,6 +8,8 @@ from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 from fastapi import FastAPI, HTTPException, Form, Depends, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -50,9 +52,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": "9294082",
         "mmsi": "710001720",
         "tipoUnidade": TipoUnidade.EMBARCACAO_EMERGENCIA_APOIO,
-        "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "N/A",
-        "observacao": None,
+        "observacao": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],  # ✅ PREENCHIDO
         "latitude": -23.5505,
         "longitude": -46.6333
     },
@@ -61,9 +63,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": "9294094",
         "mmsi": "710002450",
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
-        "licencasAutorizadas": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "N/A",
-        "observacao": None,
+        "observacao": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"],  # ✅ PREENCHIDO
         "latitude": -22.9068,
         "longitude": -43.1729
     },
@@ -74,9 +76,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
-        "licencasAutorizadas": ["Ofício nº 95/2026/Coprod/CGMac/Dilic"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "06/04/2026",
-        "observacao": None,
+        "observacao": ["Ofício nº 95/2026/Coprod/CGMac/Dilic"],  # ✅ PREENCHIDO
         "latitude": -23.2237,
         "longitude": -44.2683
     },
@@ -87,9 +89,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.8683,
         "longitude": -48.3563
     },
@@ -98,9 +100,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": None,
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.7211,
         "longitude": -48.3215
     },
@@ -109,9 +111,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": "538003593",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.5689,
         "longitude": -48.2954
     },
@@ -120,9 +122,9 @@ ATIVOS_AUTORIZADOS = {
         "imo": None,
         "mmsi": "538001903",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
-        "licencasAutorizadas": ["LO Nº 1572/2020 - 1ª Retificação"],
+        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",
+        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.6542,
         "longitude": -48.3789
     }
