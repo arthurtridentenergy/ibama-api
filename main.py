@@ -54,7 +54,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_EMERGENCIA_APOIO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "N/A",
-        "observacao": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],  # ✅ PREENCHIDO
+        "observacao": "Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)",  # ✅ PREENCHIDO
         "latitude": -23.5505,
         "longitude": -46.6333
     },
@@ -65,7 +65,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "N/A",
-        "observacao": ["Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)"],  # ✅ PREENCHIDO
+        "observacao": "Anuência - Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)",  # ✅ PREENCHIDO
         "latitude": -22.9068,
         "longitude": -43.1729
     },
@@ -78,7 +78,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "06/04/2026",
-        "observacao": ["Ofício nº 95/2026/Coprod/CGMac/Dilic"],  # ✅ PREENCHIDO
+        "observacao": "Ofício nº 95/2026/Coprod/CGMac/Dilic",  # ✅ PREENCHIDO
         "latitude": -23.2237,
         "longitude": -44.2683
     },
@@ -91,7 +91,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
+        "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.8683,
         "longitude": -48.3563
     },
@@ -102,7 +102,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
+        "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.7211,
         "longitude": -48.3215
     },
@@ -113,7 +113,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
+        "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.5689,
         "longitude": -48.2954
     },
@@ -124,7 +124,7 @@ ATIVOS_AUTORIZADOS = {
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
-        "observacao": "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
+        "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
         "latitude": -27.6542,
         "longitude": -48.3789
     }
