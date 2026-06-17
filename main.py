@@ -516,7 +516,7 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
     - 2 Vessels: MAERSK VEGA, Maersk Ventura
     - 4 Plataformas: PPM-1, PCE-1, P65, P08
     
-    Total: 7 unidades
+    Total: 6 unidades
     """
     # RETIRADO - 1 Vessel: Seastar Virtus
     
