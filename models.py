@@ -36,9 +36,9 @@ class UnidadeMaritima(BaseModel):
                 "imo": "9294082",
                 "mmsi": "710001720",
                 "tipoUnidade": "EMBARCACAO_EMERGENCIA_APOIO",
-                "licencasAutorizadas": ["Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)"],
+                "licencasAutorizadas": ["LO1572/2020"],
                 "validade": "N/A",
-                "observacao": None,
+                "observacao": "Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)",
                 "disponibilidadeInicio": "2024-01-01T00:00:00Z",
                 "disponibilidadeFim": None
             }
@@ -48,7 +48,7 @@ class UnidadeMaritima(BaseModel):
 class PosicaoAIS(BaseModel):
     """Modelo de posição geográfica conforme especificação IBAMA 1.4.2"""
     mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) ou nulo para plataformas")
-    nome: Optional[str] = Field(None, description="Nome da unidade (para plataformas e Seastar Virtus)")
+    nome: Optional[str] = Field(None, description="Nome da unidade (para plataformas)")
     latitude: float = Field(..., description="Coordenada de latitude em formato decimal")
     longitude: float = Field(..., description="Coordenada de longitude em formato decimal")
     timestampAquisicao: str = Field(..., description="Data/hora ISO 8601 UTC com Z")

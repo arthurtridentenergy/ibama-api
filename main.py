@@ -70,18 +70,19 @@ ATIVOS_AUTORIZADOS = {
         "longitude": -43.1729
     },
 
+    # REMOVENDO SEASTAR VIRTUS
     # ===== SEASTAR VIRTUS =====
-    "SEASTAR_VIRTUS": {
-        "nome": "Seastar Virtus",
-        "imo": None,
-        "mmsi": None,
-        "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
-        "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
-        "validade": "06/04/2026",
-        "observacao": "Ofício nº 95/2026/Coprod/CGMac/Dilic",  # ✅ PREENCHIDO
-        "latitude": -23.2237,
-        "longitude": -44.2683
-    },
+    #"SEASTAR_VIRTUS": {
+    #    "nome": "Seastar Virtus",
+    #    "imo": None,
+    #    "mmsi": "710011000",
+    #    "tipoUnidade": TipoUnidade.EMBARCACAO_APOIO,
+    #    "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
+    #    "validade": "06/04/2026",
+    #    "observacao": "Ofício nº 95/2026/Coprod/CGMac/Dilic",  # ✅ PREENCHIDO
+    #    "latitude": -23.2237,
+    #    "longitude": -44.2683
+    #},
     
     # ===== PLATAFORMAS (4) — COM MMSIs ADICIONADOS PARA P08 E P65 =====
     "PPM1": {
@@ -513,11 +514,12 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
     
     Retorna:
     - 2 Vessels: MAERSK VEGA, Maersk Ventura
-    - 1 Vessel: Seastar Virtus
     - 4 Plataformas: PPM-1, PCE-1, P65, P08
     
     Total: 7 unidades
     """
+    # RETIRADO - 1 Vessel: Seastar Virtus
+    
     logger.info(f"[API] GET /v1/unidades - Client: {client_id}")
 
     try:
@@ -571,22 +573,23 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
                             disponibilidadeFim=None
                         ))
 
+        # REMOVENDO SEASTAR VIRTUS
         # ===== Adicionar Seastar Virtus (não está no Spinergie) =====
-        if "SEASTAR_VIRTUS" in ATIVOS_AUTORIZADOS:
-            dados = ATIVOS_AUTORIZADOS["SEASTAR_VIRTUS"]
-            logger.info(f"[API] Incluindo vessel estático: {dados['nome']}")
+        #if "SEASTAR_VIRTUS" in ATIVOS_AUTORIZADOS:
+        #    dados = ATIVOS_AUTORIZADOS["SEASTAR_VIRTUS"]
+        #    logger.info(f"[API] Incluindo vessel estático: {dados['nome']}")
 
-            unidades.append(UnidadeMaritima(
-                nome=dados["nome"],
-                imo=dados.get("imo"),
-                mmsi=dados.get("mmsi"),
-                tipoUnidade=dados["tipoUnidade"],
-                licencasAutorizadas=dados.get("licencasAutorizadas", []),
-                validade=dados.get("validade"),
-                observacao=dados.get("observacao"),
-                disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
-                disponibilidadeFim=None
-            ))
+        #    unidades.append(UnidadeMaritima(
+        #        nome=dados["nome"],
+        #        imo=dados.get("imo"),
+        #        mmsi=dados.get("mmsi"),
+        #        tipoUnidade=dados["tipoUnidade"],
+        #        licencasAutorizadas=dados.get("licencasAutorizadas", []),
+        #        validade=dados.get("validade"),
+        #        observacao=dados.get("observacao"),
+        #        disponibilidadeInicio=datetime.now(timezone.utc).isoformat() + "Z",
+        #        disponibilidadeFim=None
+        #    ))
 
         # ===== Adicionar Plataformas (não estão no Spinergie) =====
         for plataforma_id in ["PPM1", "PCE1", "P65", "P08"]:
@@ -655,17 +658,19 @@ async def get_posicao(
 
     Parâmetros:
     - mmsi: Número MMSI (para vessels com MMSI)
-    - nome: Nome da unidade (para plataformas e Seastar Virtus)
+    - nome: Nome da unidade (para plataformas)
 
     Pelo menos um dos dois parâmetros deve ser fornecido e válido.
 
     Exemplos:
     - GET /v1/posicao?mmsi=710001720 (MAERSK VEGA)
     - GET /v1/posicao?nome=PPM-1 (Plataforma)
-    - GET /v1/posicao?nome=Seastar Virtus (Seastar Virtus)
     - GET /v1/posicao?mmsi=538001903 (P08)
     - GET /v1/posicao?mmsi=538003593 (P65)
     """
+    
+    # RETIRADO - - nome: Nome da unidade (para plataformas e Seastar Virtus) / - GET /v1/posicao?nome=Seastar Virtus (Seastar Virtus)
+    
     logger.info(f"[API] GET /v1/posicao - MMSI: {mmsi}, Nome: {nome} - Client: {client_id}")
 
     nome_convertido_do_mmsi = False
