@@ -88,7 +88,7 @@ ATIVOS_AUTORIZADOS = {
     "PPM1": {
         "nome": "PPM-1",
         "imo": None,
-        "mmsi": None,
+        "mmsi": "PPM-1",
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
@@ -99,7 +99,7 @@ ATIVOS_AUTORIZADOS = {
     "PCE1": {
         "nome": "PCE-1",
         "imo": None,
-        "mmsi": None,
+        "mmsi": "PCE-1",
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
