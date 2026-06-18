@@ -664,7 +664,9 @@ async def get_posicao(
 
     Exemplos:
     - GET /v1/posicao?mmsi=710001720 (MAERSK VEGA)
-    - GET /v1/posicao?nome=PPM-1 (Plataforma)
+    - GET /v1/posicao?nome=PPM-1 (Plataforma PPM-1)
+    - GET /v1/posicao?mmsi=PPM-1 (Plataforma PPM-1)
+    - GET /v1/posicao?mmsi=PCE-1 (Plataforma PCE-1)
     - GET /v1/posicao?mmsi=538001903 (P08)
     - GET /v1/posicao?mmsi=538003593 (P65)
     """
@@ -692,6 +694,18 @@ async def get_posicao(
             nome = "P08"
             mmsi = None
             nome_convertido_do_mmsi = True
+            
+        elif mmsi == "PPM-1":
+            logger.info(f"[API] Convertendo MMSI PPM-1 para nome PPM-1 - Client: {client_id}")
+            nome = "PPM-1"
+            mmsi = None
+            nome_convertido_do_mmsi = True
+            
+        elif mmsi == "PCE-1":
+            logger.info(f"[API] Convertendo MMSI PCE-1 para nome PCE-1 - Client: {client_id}")
+            nome = "PCE-1"
+            mmsi = None
+            nome_convertido_do_mmsi = True
 
     # ===== Busca por MMSI =====
     if mmsi and not nome:
@@ -699,7 +713,7 @@ async def get_posicao(
         logger.debug(f"[DEBUG] Buscando por MMSI: {mmsi}")
 
         # Validar se é um MMSI autorizado (vessels + plataformas com MMSI)
-        if mmsi not in ["710001720", "710002450", "538001903", "538003593"]:
+        if mmsi not in ["710001720", "710002450", "538001903", "538003593", "PPM-1", "PCE-1"]:
 
             logger.warning(f"[WARNING] MMSI {mmsi} não autorizado")
 
