@@ -93,8 +93,8 @@ ATIVOS_AUTORIZADOS = {
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
         "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
-        "latitude": -27.8683,
-        "longitude": -48.3563
+        "latitude": -22.798,        # ✅ CORRETO (22°47.88S)
+        "longitude": -40.7625      # ✅ CORRETO (040°45.75W)
     },
     "PCE1": {
         "nome": "PCE-1",
@@ -104,30 +104,30 @@ ATIVOS_AUTORIZADOS = {
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
         "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
-        "latitude": -27.7211,
-        "longitude": -48.3215
+        "latitude": -22.708,        # ✅ CORRETO (22°42.50S)
+        "longitude": -40.693       # ✅ CORRETO (040°41.59W)
     },
     "P65": {
-        "nome": "P65",
+        "nome": "P-65",
         "imo": None,
         "mmsi": "538003593",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
         "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
-        "latitude": -27.5689,
-        "longitude": -48.2954
+        "latitude": -22.673,        # ✅ CORRETO (22°40.39S)
+        "longitude": -40.547       # ✅ CORRETO (040°32.79W)
     },
     "P08": {
-        "nome": "P08",
+        "nome": "P-08",
         "imo": None,
         "mmsi": "538001903",  # MMSI ADICIONADO
         "tipoUnidade": TipoUnidade.UNIDADE_PRODUCAO,
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
         "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
-        "latitude": -27.6542,
-        "longitude": -48.3789
+        "latitude": -22.702,        # ✅ CORRETO (22°42.11S)
+        "longitude": -40.677       # ✅ CORRETO (040°40.63W)
     }
 }
 
@@ -514,7 +514,7 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
     
     Retorna:
     - 2 Vessels: MAERSK VEGA, Maersk Ventura
-    - 4 Plataformas: PPM-1, PCE-1, P65, P08
+    - 4 Plataformas: PPM-1, PCE-1, P-65, P-08
     
     Total: 6 unidades
     """
@@ -592,7 +592,7 @@ async def get_unidades(client_id: str = Depends(get_current_client_id)):
         #    ))
 
         # ===== Adicionar Plataformas (não estão no Spinergie) =====
-        for plataforma_id in ["PPM1", "PCE1", "P65", "P08"]:
+        for plataforma_id in ["PPM1", "PCE1", "P-65", "P-08"]:
             if plataforma_id in ATIVOS_AUTORIZADOS:
                 dados = ATIVOS_AUTORIZADOS[plataforma_id]
                 logger.info(f"[API] Incluindo plataforma: {dados['nome']}")
@@ -667,8 +667,8 @@ async def get_posicao(
     - GET /v1/posicao?nome=PPM-1 (Plataforma PPM-1)
     - GET /v1/posicao?mmsi=PPM-1 (Plataforma PPM-1)
     - GET /v1/posicao?mmsi=PCE-1 (Plataforma PCE-1)
-    - GET /v1/posicao?mmsi=538001903 (P08)
-    - GET /v1/posicao?mmsi=538003593 (P65)
+    - GET /v1/posicao?mmsi=538001903 (P-08)
+    - GET /v1/posicao?mmsi=538003593 (P-65)
     """
     
     # RETIRADO - - nome: Nome da unidade (para plataformas e Seastar Virtus) / - GET /v1/posicao?nome=Seastar Virtus (Seastar Virtus)
@@ -684,14 +684,14 @@ async def get_posicao(
         # Conversão especial:
         # P65 e P08 devem ser buscados no Spinergie pelo NOME
         if mmsi == "538003593":
-            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P65 - Client: {client_id}")
-            nome = "P65"
+            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P-65 - Client: {client_id}")
+            nome = "P-65"
             mmsi = None
             nome_convertido_do_mmsi = True
 
         elif mmsi == "538001903":
-            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P08 - Client: {client_id}")
-            nome = "P08"
+            logger.info(f"[API] Convertendo MMSI {mmsi} para nome P-08 - Client: {client_id}")
+            nome = "P-08"
             mmsi = None
             nome_convertido_do_mmsi = True
             
