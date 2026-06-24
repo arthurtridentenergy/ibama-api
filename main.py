@@ -107,7 +107,7 @@ ATIVOS_AUTORIZADOS = {
         "latitude": -22.708,        # ✅ CORRETO (22°42.50S)
         "longitude": -40.693       # ✅ CORRETO (040°41.59W)
     },
-    "P65": {
+    "P-65": {
         "nome": "P-65",
         "imo": None,
         "mmsi": "538003593",  # MMSI ADICIONADO
@@ -118,7 +118,7 @@ ATIVOS_AUTORIZADOS = {
         "latitude": -22.673,        # ✅ CORRETO (22°40.39S)
         "longitude": -40.547       # ✅ CORRETO (040°32.79W)
     },
-    "P08": {
+    "P-08": {
         "nome": "P-08",
         "imo": None,
         "mmsi": "538001903",  # MMSI ADICIONADO
