@@ -126,8 +126,8 @@ ATIVOS_AUTORIZADOS = {
         "licencasAutorizadas": ["LO1572/2020"],  # ✅ ALTERADO
         "validade": "11/07/2024",
         "observacao":  "LO Nº 1572/2020 - 1ª Retificação - Renovação solicitada dentro do prazo legal. Aguardando manifestação do IBAMA",  # ✅ ALTERADO
-        "latitude": -22.702,        # ✅ CORRETO (22°42.11S)
-        "longitude": -40.677       # ✅ CORRETO (040°40.63W)
+        "latitude": -22.6732,     # ✅ CORRETO (22°40.39S)
+        "longitude": -40.5465,    # ✅ CORRETO (040°32.79W)
     }
 }
 
