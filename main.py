@@ -1,127 +1,337 @@
-from fastapi import FastAPI, HTTPException, Path
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+import asyncio
 import logging
-from spinergie_service import fetch_vessel_position_async
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import httpx
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+logger = logging.getLogger("spinergie_locations_proxy")
+
+
+# ---------------------------------------------------------------------------
+# Configuration - read from environment variables
+# ---------------------------------------------------------------------------
+class AppConfig:
+    def __init__(self) -> None:
+        self.base_url = (os.getenv("SPINERGIE_BASE_URL") or "https://api.spinergie.com").rstrip("/")
+        self.username = os.getenv("SPINERGIE_USERNAME")
+        self.password = os.getenv("SPINERGIE_PASSWORD")
+        self.api_token = os.getenv("SPINERGIE_API_TOKEN")
+        self.timeout = int(os.getenv("SPINERGIE_TIMEOUT", "30"))
+        # Comma-separated names, easy to extend without touching the code.
+        self.platform_names = self._split(
+            os.getenv("SPINERGIE_PLATFORM_NAMES", "PCE-1,PPM-1,P-08,P-65")
+        )
+        self.vessel_names = self._split(
+            os.getenv("SPINERGIE_VESSEL_NAMES", "Maersk Vega,Maersk Ventura")
+        )
+
+    @staticmethod
+    def _split(value: str) -> List[str]:
+        if not value:
+            return []
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    def has_credentials(self) -> bool:
+        return bool(self.api_token) or (bool(self.username) and bool(self.password))
+
+
+config = AppConfig()
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
 app = FastAPI(
-    title="API de Posição de Embarcações",
-    description="API para consulta de posição em tempo real de embarcações via integração Spinergie.",
+    title="Spinergie Locations Proxy",
+    description="Proxy para localizações de plataformas e embarcações do Spinergie",
     version="1.0.0",
 )
 
 
-class VesselPositionResponse(BaseModel):
-    mmsi: str = Field(..., description="Maritime Mobile Service Identity (MMSI) da embarcação", example="710001720")
-    nome: str = Field(..., description="Nome da embarcação", example="MAERSK VEGA")
-    latitude: float = Field(..., description="Latitude da posição da embarcação", example=-22.0816707611)
-    longitude: float = Field(..., description="Longitude da posição da embarcação", example=-40.7330474854)
-    timestampAquisicao: str = Field(
-        ...,
-        description="Data e hora da aquisição da posição no formato ISO 8601",
-        example="2026-06-25T13:56:11+00:00Z",
-    )
+# ---------------------------------------------------------------------------
+# Pydantic models / validation
+# ---------------------------------------------------------------------------
+class LocationItem(BaseModel):
+    """Item normalizado de localização. Campos extras do Spinergie são preservados."""
+
+    name: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
     class Config:
-        json_schema_extra = {
-            "example": {
-                "mmsi": "710001720",
-                "nome": "MAERSK VEGA",
-                "latitude": -22.0816707611,
-                "longitude": -40.7330474854,
-                "timestampAquisicao": "2026-06-25T13:56:11+00:00Z",
-            }
-        }
+        extra = "allow"
 
 
-class ErrorResponse(BaseModel):
-    detail: str = Field(..., description="Mensagem descritiva do erro")
+class AllLocationsData(BaseModel):
+    platforms: List[LocationItem]
+    vessels: List[LocationItem]
 
 
-def validate_mmsi(mmsi: str) -> None:
-    if not mmsi:
-        raise HTTPException(status_code=400, detail="MMSI é obrigatório.")
+class ApiResponse(BaseModel):
+    status: str = "success"
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    count: int
+    data: Any
+    message: Optional[str] = None
 
-    if not mmsi.isdigit():
+
+# ---------------------------------------------------------------------------
+# Helpers to normalize Spinergie responses
+# ---------------------------------------------------------------------------
+LATITUDE_KEYS = ("latitude", "lat", "y", "Latitude", "Lat")
+LONGITUDE_KEYS = ("longitude", "lon", "lng", "x", "Longitude", "Long")
+
+
+def find_coordinate(obj: Any, keys: Tuple[str, ...]) -> Optional[float]:
+    """Busca latitude/longitude no dicionário principal ou em subdicionários comuns."""
+    if isinstance(obj, dict):
+        for key in keys:
+            value = obj.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        for nested in ("location", "position", "coordinates", "geo", "geometry"):
+            nested_value = obj.get(nested)
+            if isinstance(nested_value, dict):
+                found = find_coordinate(nested_value, keys)
+                if found is not None:
+                    return found
+    return None
+
+
+def find_name(item: Dict[str, Any]) -> Optional[str]:
+    for key in ("name", "vesselName", "platformName", "poiName", "Name"):
+        value = item.get(key)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def normalize_and_filter(
+    raw_items: List[Dict[str, Any]], allowed_names: List[str]
+) -> List[LocationItem]:
+    """Filtra pelo nome configurado e valida/normaliza as coordenadas."""
+    allowed_set = {name.strip() for name in allowed_names}
+    results: List[LocationItem] = []
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            logger.warning("Item não-dict ignorado na resposta do Spinergie")
+            continue
+
+        name = find_name(item)
+        if not name:
+            logger.warning("Item sem nome ignorado")
+            continue
+
+        if allowed_set and name not in allowed_set:
+            continue
+
+        latitude = find_coordinate(item, LATITUDE_KEYS)
+        longitude = find_coordinate(item, LONGITUDE_KEYS)
+
+        if latitude is None or longitude is None:
+            logger.warning("'%s' ignorado: coordenadas ausentes ou inválidas", name)
+            continue
+
+        normalized = {"name": name, "latitude": latitude, "longitude": longitude}
+        for key, value in item.items():
+            if key not in normalized:
+                normalized[key] = value
+
+        try:
+            location = LocationItem(**normalized)
+            results.append(location)
+        except ValidationError as exc:
+            logger.warning("Erro de validação para '%s': %s", name, exc)
+            continue
+
+    results.sort(key=lambda loc: loc.name)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Spinergie HTTP client
+# ---------------------------------------------------------------------------
+def get_auth() -> Tuple[Dict[str, str], Optional[httpx.BasicAuth]]:
+    headers: Dict[str, str] = {}
+    auth: Optional[httpx.BasicAuth] = None
+    if config.api_token:
+        headers["Authorization"] = f"Bearer {config.api_token}"
+    elif config.username and config.password:
+        auth = httpx.BasicAuth(config.username, config.password)
+    return headers, auth
+
+
+def parse_list_response(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("data", "items", "results", "locations", "vessels", "platforms"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+async def fetch_spinergie(path: str) -> List[Dict[str, Any]]:
+    if not config.has_credentials():
+        logger.error("Credenciais do Spinergie não configuradas")
         raise HTTPException(
-            status_code=400,
-            detail=f"MMSI inválido: '{mmsi}'. O MMSI deve conter apenas dígitos numéricos.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Spinergie credentials not configured",
         )
 
-    if len(mmsi) != 9:
+    headers, auth = get_auth()
+    url = f"{config.base_url}{path}"
+
+    async with httpx.AsyncClient(timeout=config.timeout, headers=headers) as client:
+        try:
+            response = await client.get(url, auth=auth)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("Erro upstream %s em %s: %s", exc.response.status_code, url, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Upstream Spinergie returned status {exc.response.status_code}",
+            )
+        except httpx.RequestError as exc:
+            logger.error("Erro de requisição para %s: %s", url, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to reach Spinergie API",
+            )
+
+    try:
+        raw_data = response.json()
+    except ValueError as exc:
+        logger.error("JSON inválido de %s: %s", url, exc)
         raise HTTPException(
-            status_code=400,
-            detail=f"MMSI inválido: '{mmsi}'. O MMSI deve possuir exatamente 9 dígitos.",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid JSON response from Spinergie",
         )
 
+    data = parse_list_response(raw_data)
+    if not isinstance(data, list) or (not data and not isinstance(raw_data, list)):
+        logger.error("Formato inesperado da resposta de %s: %s", url, type(raw_data))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unexpected response format from Spinergie",
+        )
 
-@app.get(
-    "/v1/posicao/{mmsi}",
-    response_model=VesselPositionResponse,
-    responses={
-        400: {"model": ErrorResponse, "description": "MMSI inválido"},
-        404: {"model": ErrorResponse, "description": "Embarcação não encontrada"},
-        503: {"model": ErrorResponse, "description": "Serviço Spinergie indisponível"},
-    },
-    summary="Consulta posição em tempo real de uma embarcação",
-    description="Retorna a posição em tempo real de uma embarcação a partir do seu MMSI, utilizando a integração Spinergie.",
-)
-async def get_vessel_position(
-    mmsi: str = Path(
-        ...,
-        title="MMSI",
-        description="Maritime Mobile Service Identity (MMSI) da embarcação com 9 dígitos numéricos",
-        min_length=9,
-        max_length=9,
-        pattern="^\\d{9}$",
+    return data
+
+
+async def fetch_platforms() -> List[LocationItem]:
+    raw = await fetch_spinergie("/sd/api/poi/locations")
+    return normalize_and_filter(raw, config.platform_names)
+
+
+async def fetch_vessels() -> List[LocationItem]:
+    raw = await fetch_spinergie("/sd/api/vessel/sfm-latest-locations")
+    return normalize_and_filter(raw, config.vessel_names)
+
+
+def build_response(data: Any, count: Optional[int] = None) -> ApiResponse:
+    return ApiResponse(
+        status="success",
+        count=count if count is not None else (len(data) if hasattr(data, "__len__") else 0),
+        data=data,
     )
-):
-    validate_mmsi(mmsi)
 
-    try:
-        vessel_data = await fetch_vessel_position_async(mmsi)
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as exc:
-        logger.error(f"Erro ao comunicar com o serviço Spinergie para MMSI {mmsi}: {exc}")
-        raise HTTPException(
-            status_code=503,
-            detail="Serviço Spinergie está indisponível no momento. Tente novamente mais tarde.",
-        )
 
-    if not vessel_data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Embarcação com MMSI '{mmsi}' não encontrada ou sem posição disponível.",
+# ---------------------------------------------------------------------------
+# Startup / error handling
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def on_startup() -> None:
+    logger.info("Iniciando Spinergie Locations Proxy")
+    logger.info("Base URL: %s", config.base_url)
+    logger.info("Plataformas configuradas: %s", config.platform_names)
+    logger.info("Embarcações configuradas: %s", config.vessel_names)
+    if not config.has_credentials():
+        logger.warning(
+            "Nenhuma credencial do Spinergie configurada. "
+            "Defina SPINERGIE_API_TOKEN ou SPINERGIE_USERNAME + SPINERGIE_PASSWORD"
         )
-
-    try:
-        position = VesselPositionResponse(
-            mmsi=str(vessel_data.get("mmsi", mmsi)),
-            nome=vessel_data.get("nome") or vessel_data.get("name") or "N/A",
-            latitude=float(vessel_data.get("latitude")),
-            longitude=float(vessel_data.get("longitude")),
-            timestampAquisicao=vessel_data.get("timestampAquisicao")
-            or vessel_data.get("timestamp")
-            or vessel_data.get("lastUpdate"),
-        )
-    except (TypeError, ValueError) as exc:
-        logger.error(f"Formato inesperado de resposta do Spinergie para MMSI {mmsi}: {exc}")
-        raise HTTPException(
-            status_code=503,
-            detail="Resposta inesperada do serviço Spinergie. Serviço pode estar indisponível.",
-        )
-
-    return position
 
 
 @app.exception_handler(Exception)
-async def generic_exception_handler(request, exc):
-    logger.error(f"Erro inesperado na requisição {request.url}: {exc}")
+async def global_exception_handler(request, exc: Exception) -> JSONResponse:
+    logger.exception("Erro não tratado")
     return JSONResponse(
-        status_code=500,
-        content={"detail": "Erro interno no servidor. Por favor, tente novamente mais tarde."},
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=ApiResponse(
+            status="error",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            count=0,
+            data=None,
+            message="Internal server error",
+        ).dict(),
     )
+
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/locations/all", response_model=ApiResponse)
+async def get_all_locations():
+    """Retorna plataformas e embarcações em uma única resposta."""
+    platforms_task = asyncio.create_task(fetch_platforms())
+    vessels_task = asyncio.create_task(fetch_vessels())
+    results = await asyncio.gather(platforms_task, vessels_task, return_exceptions=True)
+
+    errors: List[str] = []
+    for result in results:
+        if isinstance(result, Exception):
+            if isinstance(result, HTTPException):
+                errors.append(str(result.detail))
+            else:
+                errors.append(str(result))
+
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Erro ao buscar dados do Spinergie: {'; '.join(errors)}",
+        )
+
+    platforms, vessels = results
+    data = AllLocationsData(platforms=platforms, vessels=vessels)
+    return build_response(data, count=len(platforms) + len(vessels))
+
+
+@app.get("/api/platforms/locations", response_model=ApiResponse)
+async def get_platform_locations():
+    """Retorna apenas as plataformas configuradas."""
+    platforms = await fetch_platforms()
+    return build_response(platforms)
+
+
+@app.get("/api/vessels/locations", response_model=ApiResponse)
+async def get_vessel_locations():
+    """Retorna apenas as embarcações configuradas."""
+    vessels = await fetch_vessels()
+    return build_response(vessels)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
