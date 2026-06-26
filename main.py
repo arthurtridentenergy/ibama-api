@@ -1,337 +1,426 @@
-import asyncio
-import logging
+# main.py — API IBAMA com FastAPI — INTEGRAÇÃO DIRETA COM SPINERGIE
+
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+from fastapi import FastAPI, HTTPException, Form, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import timedelta, datetime, timezone
+from typing import List, Optional
+from pydantic import BaseModel, Field
+from enum import Enum
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import jwt
+import json
 
-import httpx
-from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from auth import authenticate_client, create_access_token
+from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-)
-logger = logging.getLogger("spinergie_locations_proxy")
+load_dotenv()
 
+# 
+# CONFIGURAÇÕES
+# 
 
-# ---------------------------------------------------------------------------
-# Configuration - read from environment variables
-# ---------------------------------------------------------------------------
-class AppConfig:
-    def __init__(self) -> None:
-        self.base_url = (os.getenv("SPINERGIE_BASE_URL") or "https://api.spinergie.com").rstrip("/")
-        self.username = os.getenv("SPINERGIE_USERNAME")
-        self.password = os.getenv("SPINERGIE_PASSWORD")
-        self.api_token = os.getenv("SPINERGIE_API_TOKEN")
-        self.timeout = int(os.getenv("SPINERGIE_TIMEOUT", "30"))
-        # Comma-separated names, easy to extend without touching the code.
-        self.platform_names = self._split(
-            os.getenv("SPINERGIE_PLATFORM_NAMES", "PCE-1,PPM-1,P-08,P-65")
-        )
-        self.vessel_names = self._split(
-            os.getenv("SPINERGIE_VESSEL_NAMES", "Maersk Vega,Maersk Ventura")
-        )
+JWT_SECRET = os.getenv("JWT_SECRET") or os.getenv("SECRET_KEY") or "sua-chave-secreta-padrao-nao-use-em-producao"
+ALGORITHM = "HS256"
 
-    @staticmethod
-    def _split(value: str) -> List[str]:
-        if not value:
-            return []
-        return [item.strip() for item in value.split(",") if item.strip()]
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
-    def has_credentials(self) -> bool:
-        return bool(self.api_token) or (bool(self.username) and bool(self.password))
+SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://trident-energy-br.spinergie.com")
+SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY", "")
 
+print(f"\n[CONFIG] ========== CONFIGURAÇÃO INICIAL ==========")
+print(f"[CONFIG] JWT_SECRET carregado: {'SIM' if os.getenv('JWT_SECRET') or os.getenv('SECRET_KEY') else 'NÃO'}")
+print(f"[CONFIG] CLIENT_ID: {CLIENT_ID if CLIENT_ID else 'NÃO CARREGADO'}")
+print(f"[CONFIG] CLIENT_SECRET: {'*' * 20 if CLIENT_SECRET else 'NÃO CARREGADO'}")
+print(f"[CONFIG] SPINERGIE_BASE_URL: {SPINERGIE_BASE_URL}")
+print(f"[CONFIG] SPINERGIE_API_KEY: {'*' * 20 if SPINERGIE_API_KEY else 'NÃO CARREGADO'}\n")
 
-config = AppConfig()
+# 
+# ENUMS E MODELOS CONFORME ESPECIFICAÇÃO IBAMA
+# 
+
+class TipoUnidade(str, Enum):
+    """Tipos de unidade marítima conforme especificação IBAMA."""
+    EMBARCACAO_EMERGENCIA = "EMBARCACAO_EMERGENCIA"
+    EMBARCACAO_APOIO = "EMBARCACAO_APOIO"
+    EMBARCACAO_EMERGENCIA_APOIO = "EMBARCACAO_EMERGENCIA_APOIO"
+    UNIDADE_PRODUCAO = "UNIDADE_PRODUCAO"
+    UNIDADE_PERFURACAO = "UNIDADE_PERFURACAO"
+    NAVIO_SISMICO = "NAVIO_SISMICO"
+    NAVIO_ALIVIADOR = "NAVIO_ALIVIADOR"
+    FLOTEL = "FLOTEL"
+    OTHER = "Other"
 
 
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title="Spinergie Locations Proxy",
-    description="Proxy para localizações de plataformas e embarcações do Spinergie",
-    version="1.0.0",
-)
-
-
-# ---------------------------------------------------------------------------
-# Pydantic models / validation
-# ---------------------------------------------------------------------------
-class LocationItem(BaseModel):
-    """Item normalizado de localização. Campos extras do Spinergie são preservados."""
-
-    name: str
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+class UnidadeMaritima(BaseModel):
+    """Modelo de unidade marítima conforme especificação IBAMA."""
+    nome: str = Field(..., description="Nome da unidade marítima")
+    imo: Optional[str] = Field(None, description="Número IMO")
+    mmsi: str = Field(..., description="Número MMSI")
+    tipoUnidade: TipoUnidade = Field(..., description="Tipo de unidade")
+    licencasAutorizadas: List[str] = Field(..., description="Lista de licenças")
+    disponibilidadeInicio: str = Field(..., description="Início da disponibilidade (ISO 8601 UTC)")
+    disponibilidadeFim: Optional[str] = Field(None, description="Fim da disponibilidade (ISO 8601 UTC)")
 
     class Config:
-        extra = "allow"
+        schema_extra = {
+            "example": {
+                "nome": "Navio Exemplo",
+                "imo": "IMO1234567",
+                "mmsi": "123456789",
+                "tipoUnidade": "UNIDADE_PRODUCAO",
+                "licencasAutorizadas": ["LIC001"],
+                "disponibilidadeInicio": "2024-01-01T00:00:00Z",
+                "disponibilidadeFim": None
+            }
+        }
 
 
-class AllLocationsData(BaseModel):
-    platforms: List[LocationItem]
-    vessels: List[LocationItem]
+class PosicaoAIS(BaseModel):
+    """Modelo de posição geográfica conforme especificação IBAMA."""
+    mmsi: str = Field(..., description="Número MMSI")
+    latitude: float = Field(..., description="Latitude em graus decimais")
+    longitude: float = Field(..., description="Longitude em graus decimais")
+    timestampAquisicao: str = Field(..., description="Data/hora da aquisição (ISO 8601 UTC)")
 
+    class Config:
+        schema_extra = {
+            "example": {
+                "mmsi": "123456789",
+                "latitude": -23.5505,
+                "longitude": -46.6333,
+                "timestampAquisicao": "2026-03-12T14:30:00Z"
+            }
+        }
 
-class ApiResponse(BaseModel):
-    status: str = "success"
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    count: int
-    data: Any
-    message: Optional[str] = None
+# 
+# INICIALIZAÇÃO DA APP
+# 
 
+app = FastAPI(
+    title="IBAMA Location API",
+    description="API de localização de embarcações para o IBAMA/CGMAC",
+    version="1.0.0",
+    docs_url="/v1/docs",
+    redoc_url=None,
+    openapi_url="/v1/openapi.json"
+)
 
-# ---------------------------------------------------------------------------
-# Helpers to normalize Spinergie responses
-# ---------------------------------------------------------------------------
-LATITUDE_KEYS = ("latitude", "lat", "y", "Latitude", "Lat")
-LONGITUDE_KEYS = ("longitude", "lon", "lng", "x", "Longitude", "Long")
+# 
+# CORS
+# 
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def find_coordinate(obj: Any, keys: Tuple[str, ...]) -> Optional[float]:
-    """Busca latitude/longitude no dicionário principal ou em subdicionários comuns."""
-    if isinstance(obj, dict):
-        for key in keys:
-            value = obj.get(key)
-            if value is not None:
-                try:
-                    return float(value)
-                except (ValueError, TypeError):
-                    continue
-        for nested in ("location", "position", "coordinates", "geo", "geometry"):
-            nested_value = obj.get(nested)
-            if isinstance(nested_value, dict):
-                found = find_coordinate(nested_value, keys)
-                if found is not None:
-                    return found
-    return None
+# 
+# SEGURANÇA
+# 
 
+security = HTTPBearer()
 
-def find_name(item: Dict[str, Any]) -> Optional[str]:
-    for key in ("name", "vesselName", "platformName", "poiName", "Name"):
-        value = item.get(key)
-        if value:
-            return str(value).strip()
-    return None
-
-
-def normalize_and_filter(
-    raw_items: List[Dict[str, Any]], allowed_names: List[str]
-) -> List[LocationItem]:
-    """Filtra pelo nome configurado e valida/normaliza as coordenadas."""
-    allowed_set = {name.strip() for name in allowed_names}
-    results: List[LocationItem] = []
-
-    for item in raw_items:
-        if not isinstance(item, dict):
-            logger.warning("Item não-dict ignorado na resposta do Spinergie")
-            continue
-
-        name = find_name(item)
-        if not name:
-            logger.warning("Item sem nome ignorado")
-            continue
-
-        if allowed_set and name not in allowed_set:
-            continue
-
-        latitude = find_coordinate(item, LATITUDE_KEYS)
-        longitude = find_coordinate(item, LONGITUDE_KEYS)
-
-        if latitude is None or longitude is None:
-            logger.warning("'%s' ignorado: coordenadas ausentes ou inválidas", name)
-            continue
-
-        normalized = {"name": name, "latitude": latitude, "longitude": longitude}
-        for key, value in item.items():
-            if key not in normalized:
-                normalized[key] = value
-
-        try:
-            location = LocationItem(**normalized)
-            results.append(location)
-        except ValidationError as exc:
-            logger.warning("Erro de validação para '%s': %s", name, exc)
-            continue
-
-    results.sort(key=lambda loc: loc.name)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Spinergie HTTP client
-# ---------------------------------------------------------------------------
-def get_auth() -> Tuple[Dict[str, str], Optional[httpx.BasicAuth]]:
-    headers: Dict[str, str] = {}
-    auth: Optional[httpx.BasicAuth] = None
-    if config.api_token:
-        headers["Authorization"] = f"Bearer {config.api_token}"
-    elif config.username and config.password:
-        auth = httpx.BasicAuth(config.username, config.password)
-    return headers, auth
-
-
-def parse_list_response(data: Any) -> List[Dict[str, Any]]:
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("data", "items", "results", "locations", "vessels", "platforms"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-    return []
-
-
-async def fetch_spinergie(path: str) -> List[Dict[str, Any]]:
-    if not config.has_credentials():
-        logger.error("Credenciais do Spinergie não configuradas")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Spinergie credentials not configured",
-        )
-
-    headers, auth = get_auth()
-    url = f"{config.base_url}{path}"
-
-    async with httpx.AsyncClient(timeout=config.timeout, headers=headers) as client:
-        try:
-            response = await client.get(url, auth=auth)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error("Erro upstream %s em %s: %s", exc.response.status_code, url, exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Upstream Spinergie returned status {exc.response.status_code}",
-            )
-        except httpx.RequestError as exc:
-            logger.error("Erro de requisição para %s: %s", url, exc)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Unable to reach Spinergie API",
-            )
-
+def get_current_client_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Valida o token JWT do header Authorization: Bearer <token>"""
+    token = credentials.credentials
     try:
-        raw_data = response.json()
-    except ValueError as exc:
-        logger.error("JSON inválido de %s: %s", url, exc)
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        client_id: str = payload.get("sub")
+        if client_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "invalid_token", "error_description": "Token inválido"}
+            )
+        return client_id
+    except jwt.ExpiredSignatureError:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Invalid JSON response from Spinergie",
+            status_code=401,
+            detail={"error": "token_expired", "error_description": "Token expirado"}
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": "Token inválido"}
         )
 
-    data = parse_list_response(raw_data)
-    if not isinstance(data, list) or (not data and not isinstance(raw_data, list)):
-        logger.error("Formato inesperado da resposta de %s: %s", url, type(raw_data))
+# 
+# ENDPOINTS
+# 
+
+@app.get("/", tags=["Root"])
+async def root():
+    """Endpoint raiz da API."""
+    return {
+        "message": "IBAMA Location API",
+        "version": "1.0.0",
+        "docs": "/v1/docs",
+        "health": "/health"
+    }
+
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Verifica se a API está operacional."""
+    return {
+        "status": "ok",
+        "message": "API IBAMA está operacional",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
+    }
+
+
+@app.post("/auth/token", tags=["Authentication"])
+async def get_token(
+    grant_type: str = Form(...),
+    client_id: str = Form(...),
+    client_secret: str = Form(...)
+):
+    """Endpoint de autenticação OAuth 2.0 Client Credentials."""
+    
+    if grant_type != "client_credentials":
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Unexpected response format from Spinergie",
+            status_code=400,
+            detail={
+                "error": "unsupported_grant_type",
+                "error_description": "grant_type deve ser 'client_credentials'"
+            }
         )
-
-    return data
-
-
-async def fetch_platforms() -> List[LocationItem]:
-    raw = await fetch_spinergie("/sd/api/poi/locations")
-    return normalize_and_filter(raw, config.platform_names)
-
-
-async def fetch_vessels() -> List[LocationItem]:
-    raw = await fetch_spinergie("/sd/api/vessel/sfm-latest-locations")
-    return normalize_and_filter(raw, config.vessel_names)
-
-
-def build_response(data: Any, count: Optional[int] = None) -> ApiResponse:
-    return ApiResponse(
-        status="success",
-        count=count if count is not None else (len(data) if hasattr(data, "__len__") else 0),
-        data=data,
+    
+    if not authenticate_client(client_id, client_secret):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "invalid_client",
+                "error_description": "client_id ou client_secret inválidos"
+            }
+        )
+    
+    access_token = create_access_token(
+        data={"sub": client_id},
+        expires_delta=timedelta(hours=1)
     )
+    
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 3600
+    }
 
 
-# ---------------------------------------------------------------------------
-# Startup / error handling
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def on_startup() -> None:
-    logger.info("Iniciando Spinergie Locations Proxy")
-    logger.info("Base URL: %s", config.base_url)
-    logger.info("Plataformas configuradas: %s", config.platform_names)
-    logger.info("Embarcações configuradas: %s", config.vessel_names)
-    if not config.has_credentials():
-        logger.warning(
-            "Nenhuma credencial do Spinergie configurada. "
-            "Defina SPINERGIE_API_TOKEN ou SPINERGIE_USERNAME + SPINERGIE_PASSWORD"
+@app.get("/v1/unidades", 
+         response_model=List[UnidadeMaritima],
+         tags=["Vessels"],
+         summary="Lista todas as unidades marítimas")
+async def get_unidades(client_id: str = Depends(get_current_client_id)):
+    """Retorna a lista completa de todas as unidades marítimas autorizadas do Spinergie."""
+    
+    print(f"\n[API] GET /v1/unidades - Client: {client_id}")
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {SPINERGIE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{SPINERGIE_BASE_URL}/api/vessels"
+        
+        print(f"[DEBUG] Chamando Spinergie: GET {url}")
+        print(f"[DEBUG] Headers Authorization: Bearer {SPINERGIE_API_KEY[:20]}...")
+        
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=60,
+            verify=False
         )
+        
+        print(f"[DEBUG] Spinergie Status Code: {response.status_code}")
+        print(f"[DEBUG] Spinergie Response Length: {len(response.text)} caracteres")
+        print(f"[DEBUG] Spinergie Content-Type: {response.headers.get('Content-Type')}")
+        print(f"[DEBUG] Spinergie Response Text (primeiros 500 chars): '{response.text[:500]}'")
+        
+        if response.status_code == 200:
+            try:
+                vessels_data = response.json()
+                print(f"[DEBUG] JSON parsed successfully. Type: {type(vessels_data)}")
+                
+                if isinstance(vessels_data, dict) and "vessels" in vessels_data:
+                    vessels_data = vessels_data["vessels"]
+                
+                if not isinstance(vessels_data, list):
+                    vessels_data = [vessels_data] if vessels_data else []
+                
+                unidades = []
+                for vessel in vessels_data:
+                    disponibilidade_inicio = vessel.get("disponibilidadeInicio", datetime.now(timezone.utc).isoformat() + "Z")
+                    disponibilidade_fim = vessel.get("disponibilidadeFim")
+                    
+                    unidades.append(UnidadeMaritima(
+                        nome=vessel.get("name", "Nome Desconhecido"),
+                        imo=str(vessel.get("imo", "")),
+                        mmsi=str(vessel.get("mmsi", "")),
+                        tipoUnidade=TipoUnidade(vessel.get("type", "OTHER").upper()),
+                        licencasAutorizadas=vessel.get("licenses", []),
+                        disponibilidadeInicio=disponibilidade_inicio,
+                        disponibilidadeFim=disponibilidade_fim
+                    ))
+                
+                print(f"[API] Retornando {len(unidades)} unidades do Spinergie")
+                return unidades
+            
+            except json.JSONDecodeError as e:
+                error_description = f"Resposta do Spinergie não é JSON válido: {str(e)}"
+                if response.headers.get('Content-Type', '').startswith('text/html'):
+                    error_description = "Spinergie retornou HTML em vez de JSON. Verifique o endpoint."
+                print(f"[ERROR] {error_description}")
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "spinergie_invalid_response",
+                        "error_description": error_description
+                    }
+                )
+        
+        elif response.status_code == 401:
+            print(f"[ERROR] Spinergie retornou 401: Chave de API inválida")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "spinergie_auth_error",
+                    "error_description": "Erro de autenticação com Spinergie"
+                }
+            )
+        
+        else:
+            print(f"[ERROR] Spinergie Status: {response.status_code}")
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "spinergie_error",
+                    "error_description": f"Status {response.status_code}"
+                }
+            )
+    
+    except requests.Timeout:
+        print(f"[ERROR] Timeout")
+        raise HTTPException(status_code=504, detail={"error": "spinergie_timeout"})
+    
+    except requests.ConnectionError as e:
+        print(f"[ERROR] Connection error: {e}")
+        raise HTTPException(status_code=503, detail={"error": "spinergie_connection_error"})
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        print(f"[ERROR] Exception: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": "internal_server_error", "error_description": str(e)})
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc: Exception) -> JSONResponse:
-    logger.exception("Erro não tratado")
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=ApiResponse(
-            status="error",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            count=0,
-            data=None,
-            message="Internal server error",
-        ).dict(),
-    )
-
-
-# ---------------------------------------------------------------------------
-# API endpoints
-# ---------------------------------------------------------------------------
-@app.get("/api/locations/all", response_model=ApiResponse)
-async def get_all_locations():
-    """Retorna plataformas e embarcações em uma única resposta."""
-    platforms_task = asyncio.create_task(fetch_platforms())
-    vessels_task = asyncio.create_task(fetch_vessels())
-    results = await asyncio.gather(platforms_task, vessels_task, return_exceptions=True)
-
-    errors: List[str] = []
-    for result in results:
-        if isinstance(result, Exception):
-            if isinstance(result, HTTPException):
-                errors.append(str(result.detail))
-            else:
-                errors.append(str(result))
-
-    if errors:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erro ao buscar dados do Spinergie: {'; '.join(errors)}",
+@app.get("/v1/posicao/{mmsi}", 
+         response_model=PosicaoAIS,
+         tags=["Vessels"],
+         summary="Obtém posição de um vessel")
+async def get_posicao(mmsi: str, client_id: str = Depends(get_current_client_id)):
+    """Retorna a posição geográfica mais recente de um vessel específico do Spinergie."""
+    
+    print(f"\n[API] GET /v1/posicao/{mmsi} - Client: {client_id}")
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {SPINERGIE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        url = f"{SPINERGIE_BASE_URL}/api/vessels/{mmsi}/position"
+        
+        print(f"[DEBUG] Chamando Spinergie: GET {url}")
+        print(f"[DEBUG] Headers Authorization: Bearer {SPINERGIE_API_KEY[:20]}...")
+        
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=60,
+            verify=False
         )
+        
+        print(f"[DEBUG] Spinergie Status Code: {response.status_code}")
+        print(f"[DEBUG] Spinergie Response Length: {len(response.text)} caracteres")
+        print(f"[DEBUG] Spinergie Content-Type: {response.headers.get('Content-Type')}")
+        print(f"[DEBUG] Spinergie Response Text (primeiros 500 chars): '{response.text[:500]}'")
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                print(f"[DEBUG] JSON parsed successfully")
+                
+                return PosicaoAIS(
+                    mmsi=mmsi,
+                    latitude=data.get("latitude", 0.0),
+                    longitude=data.get("longitude", 0.0),
+                    timestampAquisicao=data.get("timestamp", datetime.now(timezone.utc).isoformat() + "Z")
+                )
+            
+            except json.JSONDecodeError as e:
+                error_description = f"Resposta do Spinergie não é JSON válido: {str(e)}"
+                if response.headers.get('Content-Type', '').startswith('text/html'):
+                    error_description = "Spinergie retornou HTML em vez de JSON."
+                print(f"[ERROR] {error_description}")
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": "spinergie_invalid_response", "error_description": error_description}
+                )
+        
+        elif response.status_code == 404:
+            print(f"[ERROR] MMSI não encontrado")
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "not_found", "error_description": f"MMSI '{mmsi}' não encontrado"}
+            )
+        
+        elif response.status_code == 401:
+            print(f"[ERROR] Spinergie retornou 401")
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "spinergie_auth_error", "error_description": "Erro de autenticação"}
+            )
+        
+        else:
+            print(f"[ERROR] Spinergie Status: {response.status_code}")
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "spinergie_error", "error_description": f"Status {response.status_code}"}
+            )
+    
+    except requests.Timeout:
+        print(f"[ERROR] Timeout")
+        raise HTTPException(status_code=504, detail={"error": "spinergie_timeout"})
+    
+    except requests.ConnectionError as e:
+        print(f"[ERROR] Connection error: {e}")
+        raise HTTPException(status_code=503, detail={"error": "spinergie_connection_error"})
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        print(f"[ERROR] Exception: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": "internal_server_error", "error_description": str(e)})
 
-    platforms, vessels = results
-    data = AllLocationsData(platforms=platforms, vessels=vessels)
-    return build_response(data, count=len(platforms) + len(vessels))
 
-
-@app.get("/api/platforms/locations", response_model=ApiResponse)
-async def get_platform_locations():
-    """Retorna apenas as plataformas configuradas."""
-    platforms = await fetch_platforms()
-    return build_response(platforms)
-
-
-@app.get("/api/vessels/locations", response_model=ApiResponse)
-async def get_vessel_locations():
-    """Retorna apenas as embarcações configuradas."""
-    vessels = await fetch_vessels()
-    return build_response(vessels)
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    print(f"\n[INFO] ========== INICIANDO API IBAMA ==========")
+    print(f"[INFO] Documentação: http://localhost:8000/v1/docs\n")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
