@@ -1,65 +1,130 @@
-# models.py — Modelos Pydantic para a API IBAMA
+from fastapi import FastAPI, HTTPException, Path
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
+import logging
+from spinergie_service import fetch_vessel_position_async
 
-from pydantic import BaseModel, Field
-from typing import Optional, List
-from enum import Enum
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="IBAMA API - Monitoramento de Embarcações e Plataformas",
+    description="API para rastreamento em tempo real de embarcações e plataformas",
+    version="1.0.0",
+    docs_url="/v1/docs",
+    openapi_url="/v1/openapi.json",
+    redoc_url="/v1/redoc"
+)
 
 
-class TipoUnidade(str, Enum):
-    """Tipos de unidade marítima conforme especificação IBAMA"""
-    EMBARCACAO_EMERGENCIA = "EMBARCACAO_EMERGENCIA"
-    EMBARCACAO_APOIO = "EMBARCACAO_APOIO"
-    EMBARCACAO_EMERGENCIA_APOIO = "EMBARCACAO_EMERGENCIA_APOIO"
-    UNIDADE_PRODUCAO = "UNIDADE_PRODUCAO"
-    UNIDADE_PERFURACAO = "UNIDADE_PERFURACAO"
-    NAVIO_SISMICO = "NAVIO_SISMICO"
-    NAVIO_ALIVIADOR = "NAVIO_ALIVIADOR"
-    FLOTEL = "FLOTEL"
-
-
-class UnidadeMaritima(BaseModel):
-    """Modelo de unidade marítima conforme especificação IBAMA 1.4.1"""
-    nome: str = Field(..., description="Nome comercial ou de operação da unidade")
-    imo: Optional[str] = Field(None, description="Número IMO (7 dígitos) ou nulo")
-    mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) - Nulo para plataformas")
-    tipoUnidade: TipoUnidade = Field(..., description="Categoria da unidade conforme enum")
-    licencasAutorizadas: List[str] = Field(default_factory=list, description="Número(s) da(s) licença(s) de autorização")
-    validade: Optional[str] = Field(None, description="Data de validade da licença (DD/MM/YYYY) ou N/A")
-    observacao: Optional[str] = Field(None, description="Observação sobre a licença ou renovação")
-    disponibilidadeInicio: str = Field(..., description="Data/hora ISO 8601 UTC com Z")
-    disponibilidadeFim: Optional[str] = Field(None, description="Data/hora ISO 8601 UTC com Z ou nulo")
+class VesselPositionResponse(BaseModel):
+    mmsi: str = Field(..., description="Maritime Mobile Service Identity (MMSI) da embarcação", example="710001720")
+    nome: str = Field(..., description="Nome da embarcação", example="MAERSK VEGA")
+    latitude: float = Field(..., description="Latitude da posição da embarcação", example=-22.0816707611)
+    longitude: float = Field(..., description="Longitude da posição da embarcação", example=-40.7330474854)
+    timestampAquisicao: str = Field(
+        ...,
+        description="Data e hora da aquisição da posição no formato ISO 8601",
+        example="2026-06-25T13:56:11+00:00Z",
+    )
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
-                "nome": "MAERSK VEGA",
-                "imo": "9294082",
                 "mmsi": "710001720",
-                "tipoUnidade": "EMBARCACAO_EMERGENCIA_APOIO",
-                "licencasAutorizadas": ["LO1572/2020"],
-                "validade": "N/A",
-                "observacao": "Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)",
-                "disponibilidadeInicio": "2024-01-01T00:00:00Z",
-                "disponibilidadeFim": None
+                "nome": "MAERSK VEGA",
+                "latitude": -22.0816707611,
+                "longitude": -40.7330474854,
+                "timestampAquisicao": "2026-06-25T13:56:11+00:00Z",
             }
         }
 
 
-class PosicaoAIS(BaseModel):
-    """Modelo de posição geográfica conforme especificação IBAMA 1.4.2"""
-    mmsi: Optional[str] = Field(None, description="Número MMSI (9 dígitos) ou nulo para plataformas")
-    nome: Optional[str] = Field(None, description="Nome da unidade (para plataformas)")
-    latitude: float = Field(..., description="Coordenada de latitude em formato decimal")
-    longitude: float = Field(..., description="Coordenada de longitude em formato decimal")
-    timestampAquisicao: str = Field(..., description="Data/hora ISO 8601 UTC com Z")
+class ErrorResponse(BaseModel):
+    detail: str = Field(..., description="Mensagem descritiva do erro")
 
-    class Config:
-        schema_extra = {
-            "example": {
-                "mmsi": "710001720",
-                "nome": "MAERSK VEGA",
-                "latitude": -23.5505,
-                "longitude": -46.6333,
-                "timestampAquisicao": "2026-03-12T14:30:00Z"
-            }
-        }
+
+def validate_mmsi(mmsi: str) -> None:
+    if not mmsi:
+        raise HTTPException(status_code=400, detail="MMSI é obrigatório.")
+
+    if not mmsi.isdigit():
+        raise HTTPException(
+            status_code=400,
+            detail=f"MMSI inválido: '{mmsi}'. O MMSI deve conter apenas dígitos numéricos.",
+        )
+
+    if len(mmsi) != 9:
+        raise HTTPException(
+            status_code=400,
+            detail=f"MMSI inválido: '{mmsi}'. O MMSI deve possuir exatamente 9 dígitos.",
+        )
+
+
+@app.get(
+    "/v1/posicao/{mmsi}",
+    response_model=VesselPositionResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "MMSI inválido"},
+        404: {"model": ErrorResponse, "description": "Embarcação não encontrada"},
+        503: {"model": ErrorResponse, "description": "Serviço Spinergie indisponível"},
+    },
+    summary="Consulta posição em tempo real de uma embarcação",
+    description="Retorna a posição em tempo real de uma embarcação a partir do seu MMSI, utilizando a integração Spinergie.",
+)
+async def get_vessel_position(
+    mmsi: str = Path(
+        ...,
+        title="MMSI",
+        description="Maritime Mobile Service Identity (MMSI) da embarcação com 9 dígitos numéricos",
+        min_length=9,
+        max_length=9,
+        pattern="^\\d{9}$",
+    )
+):
+   ### validate_mmsi(mmsi)
+
+    try:
+        vessel_data = await fetch_vessel_position_async(mmsi)
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as exc:
+        logger.error(f"Erro ao comunicar com o serviço Spinergie para MMSI {mmsi}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Serviço Spinergie está indisponível no momento. Tente novamente mais tarde.",
+        )
+
+    if not vessel_data:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Embarcação com MMSI '{mmsi}' não encontrada ou sem posição disponível.",
+        )
+
+    try:
+        position = VesselPositionResponse(
+            mmsi=str(vessel_data.get("mmsi", mmsi)),
+            nome=vessel_data.get("nome") or vessel_data.get("name") or "N/A",
+            latitude=float(vessel_data.get("latitude")),
+            longitude=float(vessel_data.get("longitude")),
+            timestampAquisicao=vessel_data.get("timestampAquisicao")
+            or vessel_data.get("timestamp")
+            or vessel_data.get("lastUpdate"),
+        )
+    except (TypeError, ValueError) as exc:
+        logger.error(f"Formato inesperado de resposta do Spinergie para MMSI {mmsi}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail="Resposta inesperada do serviço Spinergie. Serviço pode estar indisponível.",
+        )
+
+    return position
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    logger.error(f"Erro inesperado na requisição {request.url}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Erro interno no servidor. Por favor, tente novamente mais tarde."},
+    )
