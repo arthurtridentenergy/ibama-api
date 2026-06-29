@@ -34,6 +34,7 @@ MANIFEST
 # Logs
 logs/
 *.log
+docs/
 
 # IDE
 .vscode/
