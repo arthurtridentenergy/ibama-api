@@ -79,6 +79,26 @@ class UnidadeMaritima(BaseModel):
         description='Longitude estatica para plataformas fixas',
         examples=[-43.1729],
     )
+    licenca_ibama: Optional[str] = Field(
+        default=None,
+        description='Número da licença IBAMA (ex: LO1572/2020)',
+        examples=['LO1572/2020'],
+    )
+    validade_licenca: Optional[str] = Field(
+        default=None,
+        description='Data de validade da licença (YYYY-MM-DD)',
+        examples=['2024-07-11'],
+    )
+    status_licenca: Optional[str] = Field(
+        default=None,
+        description='Status da licença (Renovação solicitada, Anuência, Ofício, etc)',
+        examples=['Renovação solicitada'],
+    )
+    observacao_licenca: Optional[str] = Field(
+        default=None,
+        description='Observações sobre a licença',
+        examples=['Aguardando manifestação do IBAMA'],
+    )
 
     @property
     def is_mobile(self) -> bool:
