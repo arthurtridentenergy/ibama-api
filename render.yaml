@@ -3,11 +3,10 @@ services:
     name: ibama
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    pythonVersion: 3.12
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
       - key: CLIENT_ID
         value: ibama_client
       - key: CLIENT_SECRET
