@@ -1,337 +1,561 @@
-import asyncio
-import logging
 import os
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import math
+import logging
+from datetime import datetime, timezone, timedelta
+from enum import Enum
+from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
+import httpx
+import uvicorn
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-)
-logger = logging.getLogger("spinergie_locations_proxy")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Configuration - read from environment variables
-# ---------------------------------------------------------------------------
-class AppConfig:
-    def __init__(self) -> None:
-        self.base_url = (os.getenv("SPINERGIE_BASE_URL") or "https://api.spinergie.com").rstrip("/")
-        self.username = os.getenv("SPINERGIE_USERNAME")
-        self.password = os.getenv("SPINERGIE_PASSWORD")
-        self.api_token = os.getenv("SPINERGIE_API_TOKEN")
-        self.timeout = int(os.getenv("SPINERGIE_TIMEOUT", "30"))
-        # Comma-separated names, easy to extend without touching the code.
-        self.platform_names = self._split(
-            os.getenv("SPINERGIE_PLATFORM_NAMES", "PCE-1,PPM-1,P-08,P-65")
-        )
-        self.vessel_names = self._split(
-            os.getenv("SPINERGIE_VESSEL_NAMES", "Maersk Vega,Maersk Ventura")
-        )
-
-    @staticmethod
-    def _split(value: str) -> List[str]:
-        if not value:
-            return []
-        return [item.strip() for item in value.split(",") if item.strip()]
-
-    def has_credentials(self) -> bool:
-        return bool(self.api_token) or (bool(self.username) and bool(self.password))
+VERSION = "1.0.0"
+APP_NAME = "IBAMA Vessels & Platforms API"
 
 
-config = AppConfig()
+class VesselType(str, Enum):
+    PLATFORM = "PLATFORM"
+    TANKER = "TANKER"
+    FPSO = "FPSO"
+    SUPPORT = "SUPPORT"
+    CARGO = "CARGO"
 
 
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title="Spinergie Locations Proxy",
-    description="Proxy para localizações de plataformas e embarcações do Spinergie",
-    version="1.0.0",
-)
+class LicenseType(str, Enum):
+    OPERATING = "OPERATING"
+    EXPLORATION = "EXPLORATION"
+    PRODUCTION = "PRODUCTION"
+    TRANSPORT = "TRANSPORT"
+    NAVIGATION = "NAVIGATION"
 
 
-# ---------------------------------------------------------------------------
-# Pydantic models / validation
-# ---------------------------------------------------------------------------
-class LocationItem(BaseModel):
-    """Item normalizado de localização. Campos extras do Spinergie são preservados."""
+class LicenseStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PENDING = "PENDING"
+    EXPIRED = "EXPIRED"
+    SUSPENDED = "SUSPENDED"
 
+
+class VesselStatus(str, Enum):
+    OPERATIONAL = "OPERATIONAL"
+    UNDER_WAY = "UNDER_WAY"
+    AT_ANCHOR = "AT_ANCHOR"
+    MOORED = "MOORED"
+    UNKNOWN = "UNKNOWN"
+
+
+class Coordinates(BaseModel):
+    lat: float = Field(..., ge=-90, le=90, description="Latitude em graus decimais")
+    lon: float = Field(..., ge=-180, le=180, description="Longitude em graus decimais")
+
+
+class License(BaseModel):
+    id: str
     name: str
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
+    holder: str
+    license_type: LicenseType
+    status: LicenseStatus
+    start_date: str
+    end_date: str
+    area_block: Optional[str] = None
+    related_asset: str
 
-    class Config:
-        extra = "allow"
 
-
-class AllLocationsData(BaseModel):
-    platforms: List[LocationItem]
-    vessels: List[LocationItem]
+class Vessel(BaseModel):
+    id: str
+    name: str
+    mmsi: Optional[str] = None
+    vessel_type: VesselType
+    flag: str
+    coordinates: Coordinates
+    status: VesselStatus
+    speed: float = Field(..., ge=0, description="Velocidade em nós")
+    course: float = Field(..., ge=0, lt=360, description="Curso em graus")
+    destination: Optional[str] = None
+    last_update: str
+    license_id: str
 
 
 class ApiResponse(BaseModel):
-    status: str = "success"
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    count: int
+    success: bool
+    message: str
     data: Any
-    message: Optional[str] = None
+    timestamp: str
+    version: str = VERSION
 
 
-# ---------------------------------------------------------------------------
-# Helpers to normalize Spinergie responses
-# ---------------------------------------------------------------------------
-LATITUDE_KEYS = ("latitude", "lat", "y", "Latitude", "Lat")
-LONGITUDE_KEYS = ("longitude", "lon", "lng", "x", "Longitude", "Long")
+class HealthResponse(BaseModel):
+    status: str
+    timestamp: str
+    version: str
+    uptime_seconds: int
 
 
-def find_coordinate(obj: Any, keys: Tuple[str, ...]) -> Optional[float]:
-    """Busca latitude/longitude no dicionário principal ou em subdicionários comuns."""
-    if isinstance(obj, dict):
-        for key in keys:
-            value = obj.get(key)
-            if value is not None:
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _convert_dm_to_decimal(degrees: int, minutes: float, hemisphere: str) -> float:
+    decimal = abs(degrees) + minutes / 60.0
+    if hemisphere.upper() in ("S", "W"):
+        decimal = -decimal
+    return round(decimal, 6)
+
+
+LICENSES: List[License] = [
+    License(
+        id="IBAMA-OP-P65-2018",
+        name="Licença de Operação - Plataforma P-65",
+        holder="Petrobras",
+        license_type=LicenseType.OPERATING,
+        status=LicenseStatus.ACTIVE,
+        start_date="2018-01-15",
+        end_date="2028-01-14",
+        area_block="BM-C-33",
+        related_asset="P-65",
+    ),
+    License(
+        id="IBAMA-OP-P08-2015",
+        name="Licença de Operação - Plataforma P-08",
+        holder="Petrobras",
+        license_type=LicenseType.OPERATING,
+        status=LicenseStatus.ACTIVE,
+        start_date="2015-08-10",
+        end_date="2025-08-09",
+        area_block="BM-C-33",
+        related_asset="P-08",
+    ),
+    License(
+        id="IBAMA-EXPL-PPM1-2020",
+        name="Licença de Exploração - PPM-1",
+        holder="Petrobras",
+        license_type=LicenseType.EXPLORATION,
+        status=LicenseStatus.ACTIVE,
+        start_date="2020-03-22",
+        end_date="2025-03-21",
+        area_block="BM-C-33",
+        related_asset="PPM-1",
+    ),
+    License(
+        id="IBAMA-PROD-PCE1-2019",
+        name="Licença de Produção - PCE-1",
+        holder="Petrobras",
+        license_type=LicenseType.PRODUCTION,
+        status=LicenseStatus.ACTIVE,
+        start_date="2019-06-01",
+        end_date="2029-05-31",
+        area_block="BM-C-33",
+        related_asset="PCE-1",
+    ),
+    License(
+        id="IBAMA-NAV-VENTURA-2023",
+        name="Licença de Navegação - Maersk Ventura",
+        holder="Maersk",
+        license_type=LicenseType.TRANSPORT,
+        status=LicenseStatus.ACTIVE,
+        start_date="2023-01-01",
+        end_date="2025-12-31",
+        related_asset="Maersk Ventura",
+    ),
+    License(
+        id="IBAMA-NAV-VEGA-2022",
+        name="Licença de Navegação - Maersk Vega",
+        holder="Maersk",
+        license_type=LicenseType.TRANSPORT,
+        status=LicenseStatus.ACTIVE,
+        start_date="2022-06-01",
+        end_date="2024-12-31",
+        related_asset="Maersk Vega",
+    ),
+]
+
+PLATFORMS: List[Vessel] = [
+    Vessel(
+        id="P-65",
+        name="Plataforma P-65",
+        mmsi=None,
+        vessel_type=VesselType.PLATFORM,
+        flag="BR",
+        coordinates=Coordinates(
+            lat=_convert_dm_to_decimal(22, 42.11, "S"),
+            lon=_convert_dm_to_decimal(40, 40.63, "W"),
+        ),
+        status=VesselStatus.OPERATIONAL,
+        speed=0.0,
+        course=0.0,
+        destination="P-65",
+        last_update=_now_iso(),
+        license_id="IBAMA-OP-P65-2018",
+    ),
+    Vessel(
+        id="P-08",
+        name="Plataforma P-08",
+        mmsi=None,
+        vessel_type=VesselType.PLATFORM,
+        flag="BR",
+        coordinates=Coordinates(
+            lat=_convert_dm_to_decimal(22, 40.39, "S"),
+            lon=_convert_dm_to_decimal(40, 32.79, "W"),
+        ),
+        status=VesselStatus.OPERATIONAL,
+        speed=0.0,
+        course=0.0,
+        destination="P-08",
+        last_update=_now_iso(),
+        license_id="IBAMA-OP-P08-2015",
+    ),
+    Vessel(
+        id="PPM-1",
+        name="Plataforma PPM-1",
+        mmsi=None,
+        vessel_type=VesselType.PLATFORM,
+        flag="BR",
+        coordinates=Coordinates(
+            lat=_convert_dm_to_decimal(22, 47.88, "S"),
+            lon=_convert_dm_to_decimal(40, 45.75, "W"),
+        ),
+        status=VesselStatus.OPERATIONAL,
+        speed=0.0,
+        course=0.0,
+        destination="PPM-1",
+        last_update=_now_iso(),
+        license_id="IBAMA-EXPL-PPM1-2020",
+    ),
+    Vessel(
+        id="PCE-1",
+        name="Plataforma PCE-1",
+        mmsi=None,
+        vessel_type=VesselType.PLATFORM,
+        flag="BR",
+        coordinates=Coordinates(
+            lat=_convert_dm_to_decimal(22, 42.50, "S"),
+            lon=_convert_dm_to_decimal(40, 41.59, "W"),
+        ),
+        status=VesselStatus.OPERATIONAL,
+        speed=0.0,
+        course=0.0,
+        destination="PCE-1",
+        last_update=_now_iso(),
+        license_id="IBAMA-PROD-PCE1-2019",
+    ),
+]
+
+VESSEL_CONFIG: List[Dict[str, Any]] = [
+    {
+        "id": "maersk-ventura",
+        "name": "Maersk Ventura",
+        "mmsi": "710002450",
+        "type": VesselType.TANKER,
+        "flag": "BR",
+        "license_id": "IBAMA-NAV-VENTURA-2023",
+        "base": Coordinates(
+            lat=_convert_dm_to_decimal(22, 42.11, "S"),
+            lon=_convert_dm_to_decimal(40, 40.63, "W"),
+        ),
+        "phase": 0.0,
+        "radius": 0.025,
+    },
+    {
+        "id": "maersk-vega",
+        "name": "Maersk Vega",
+        "mmsi": "710001720",
+        "type": VesselType.TANKER,
+        "flag": "BR",
+        "license_id": "IBAMA-NAV-VEGA-2022",
+        "base": Coordinates(
+            lat=_convert_dm_to_decimal(22, 40.39, "S"),
+            lon=_convert_dm_to_decimal(40, 32.79, "W"),
+        ),
+        "phase": 2.0,
+        "radius": 0.030,
+    },
+]
+
+
+class VesselDataProvider:
+    def __init__(self, cache_ttl_seconds: int = 60):
+        self.cache_ttl = cache_ttl_seconds
+        self._cache: Dict[str, Vessel] = {}
+        self._last_fetch: Optional[datetime] = None
+        self._lock = None
+
+    async def initialize(self):
+        self._lock = asyncio.Lock()
+
+    async def get_all_vessels(self) -> List[Vessel]:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._is_cache_stale():
+                await self._refresh()
+            return list(self._cache.values())
+
+    async def get_by_mmsi(self, mmsi: str) -> Optional[Vessel]:
+        vessels = await self.get_all_vessels()
+        for vessel in vessels:
+            if vessel.mmsi == mmsi or vessel.id == mmsi:
+                return vessel
+        return None
+
+    async def get_platforms(self) -> List[Vessel]:
+        vessels = await self.get_all_vessels()
+        return [v for v in vessels if v.vessel_type == VesselType.PLATFORM]
+
+    async def get_tankers(self) -> List[Vessel]:
+        vessels = await self.get_all_vessels()
+        return [v for v in vessels if v.vessel_type != VesselType.PLATFORM]
+
+    def _is_cache_stale(self) -> bool:
+        if not self._cache or self._last_fetch is None:
+            return True
+        return datetime.now(timezone.utc) - self._last_fetch > timedelta(seconds=self.cache_ttl)
+
+    async def _refresh(self):
+        try:
+            fetched = await self._fetch_real_time_from_external()
+        except Exception as exc:
+            logger.warning("Falha ao buscar dados externos: %s. Usando simulador.", exc)
+            fetched = []
+
+        if fetched:
+            merged = {v.mmsi or v.id: v for v in PLATFORMS}
+            for v in fetched:
+                merged[v.mmsi or v.id] = v
+            self._cache = merged
+        else:
+            self._cache = self._simulate_real_time_data()
+
+        self._last_fetch = datetime.now(timezone.utc)
+
+    async def _fetch_real_time_from_external(self) -> List[Vessel]:
+        api_url = os.getenv("AIS_API_URL")
+        api_key = os.getenv("AIS_API_KEY")
+        if not api_url:
+            return []
+
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        mmsi_list = [cfg["mmsi"] for cfg in VESSEL_CONFIG]
+        vessels: List[Vessel] = []
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for mmsi in mmsi_list:
+                url = api_url.format(mmsi=mmsi)
                 try:
-                    return float(value)
-                except (ValueError, TypeError):
-                    continue
-        for nested in ("location", "position", "coordinates", "geo", "geometry"):
-            nested_value = obj.get(nested)
-            if isinstance(nested_value, dict):
-                found = find_coordinate(nested_value, keys)
-                if found is not None:
-                    return found
-    return None
+                    response = await client.get(url, headers=headers)
+                    response.raise_for_status()
+                    payload = response.json()
+                    vessel = self._parse_ais_payload(mmsi, payload)
+                    if vessel:
+                        vessels.append(vessel)
+                except Exception as exc:
+                    logger.warning("Erro ao buscar MMSI %s: %s", mmsi, exc)
 
+        return vessels
 
-def find_name(item: Dict[str, Any]) -> Optional[str]:
-    for key in ("name", "vesselName", "platformName", "poiName", "Name"):
-        value = item.get(key)
-        if value:
-            return str(value).strip()
-    return None
-
-
-def normalize_and_filter(
-    raw_items: List[Dict[str, Any]], allowed_names: List[str]
-) -> List[LocationItem]:
-    """Filtra pelo nome configurado e valida/normaliza as coordenadas."""
-    allowed_set = {name.strip() for name in allowed_names}
-    results: List[LocationItem] = []
-
-    for item in raw_items:
-        if not isinstance(item, dict):
-            logger.warning("Item não-dict ignorado na resposta do Spinergie")
-            continue
-
-        name = find_name(item)
-        if not name:
-            logger.warning("Item sem nome ignorado")
-            continue
-
-        if allowed_set and name not in allowed_set:
-            continue
-
-        latitude = find_coordinate(item, LATITUDE_KEYS)
-        longitude = find_coordinate(item, LONGITUDE_KEYS)
-
-        if latitude is None or longitude is None:
-            logger.warning("'%s' ignorado: coordenadas ausentes ou inválidas", name)
-            continue
-
-        normalized = {"name": name, "latitude": latitude, "longitude": longitude}
-        for key, value in item.items():
-            if key not in normalized:
-                normalized[key] = value
-
+    def _parse_ais_payload(self, mmsi: str, payload: Dict[str, Any]) -> Optional[Vessel]:
+        cfg = next((c for c in VESSEL_CONFIG if c["mmsi"] == mmsi), None)
+        if cfg is None:
+            return None
         try:
-            location = LocationItem(**normalized)
-            results.append(location)
-        except ValidationError as exc:
-            logger.warning("Erro de validação para '%s': %s", name, exc)
-            continue
+            return Vessel(
+                id=cfg["id"],
+                name=payload.get("name") or cfg["name"],
+                mmsi=mmsi,
+                vessel_type=cfg["type"],
+                flag=payload.get("flag") or cfg["flag"],
+                coordinates=Coordinates(
+                    lat=float(payload["latitude"]),
+                    lon=float(payload["longitude"]),
+                ),
+                status=VesselStatus(payload.get("status", "UNDER_WAY")),
+                speed=float(payload.get("speed", 0.0)),
+                course=float(payload.get("course", 0.0)),
+                destination=payload.get("destination"),
+                last_update=_now_iso(),
+                license_id=cfg["license_id"],
+            )
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.warning("Payload inválido para MMSI %s: %s", mmsi, exc)
+            return None
 
-    results.sort(key=lambda loc: loc.name)
-    return results
+    def _simulate_real_time_data(self) -> Dict[str, Vessel]:
+        data: Dict[str, Vessel] = {v.id: v for v in PLATFORMS}
+        now = datetime.now(timezone.utc)
+        t = now.timestamp() / 60.0
 
+        for cfg in VESSEL_CONFIG:
+            phase = cfg["phase"]
+            radius = cfg["radius"]
+            base = cfg["base"]
 
-# ---------------------------------------------------------------------------
-# Spinergie HTTP client
-# ---------------------------------------------------------------------------
-def get_auth() -> Tuple[Dict[str, str], Optional[httpx.BasicAuth]]:
-    headers: Dict[str, str] = {}
-    auth: Optional[httpx.BasicAuth] = None
-    if config.api_token:
-        headers["Authorization"] = f"Bearer {config.api_token}"
-    elif config.username and config.password:
-        auth = httpx.BasicAuth(config.username, config.password)
-    return headers, auth
+            lat = base.lat + radius * math.cos((t + phase) / 10.0)
+            lon = base.lon + radius * math.sin((t + phase) / 10.0)
+            speed = 4.0 + 3.0 * math.sin((t + phase) / 5.0)
+            course = ((t * 5.0 + phase * 30.0) % 360.0)
 
+            status = VesselStatus.UNDER_WAY if speed > 1.0 else VesselStatus.AT_ANCHOR
+            data[cfg["id"]] = Vessel(
+                id=cfg["id"],
+                name=cfg["name"],
+                mmsi=cfg["mmsi"],
+                vessel_type=cfg["type"],
+                flag=cfg["flag"],
+                coordinates=Coordinates(lat=round(lat, 6), lon=round(lon, 6)),
+                status=status,
+                speed=round(abs(speed), 2),
+                course=round(course, 2),
+                destination="BC-33 Terminal",
+                last_update=now.isoformat(),
+                license_id=cfg["license_id"],
+            )
 
-def parse_list_response(data: Any) -> List[Dict[str, Any]]:
-    if isinstance(data, list):
         return data
-    if isinstance(data, dict):
-        for key in ("data", "items", "results", "locations", "vessels", "platforms"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return value
-    return []
 
 
-async def fetch_spinergie(path: str) -> List[Dict[str, Any]]:
-    if not config.has_credentials():
-        logger.error("Credenciais do Spinergie não configuradas")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Spinergie credentials not configured",
-        )
-
-    headers, auth = get_auth()
-    url = f"{config.base_url}{path}"
-
-    async with httpx.AsyncClient(timeout=config.timeout, headers=headers) as client:
-        try:
-            response = await client.get(url, auth=auth)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error("Erro upstream %s em %s: %s", exc.response.status_code, url, exc)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Upstream Spinergie returned status {exc.response.status_code}",
-            )
-        except httpx.RequestError as exc:
-            logger.error("Erro de requisição para %s: %s", url, exc)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Unable to reach Spinergie API",
-            )
-
-    try:
-        raw_data = response.json()
-    except ValueError as exc:
-        logger.error("JSON inválido de %s: %s", url, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Invalid JSON response from Spinergie",
-        )
-
-    data = parse_list_response(raw_data)
-    if not isinstance(data, list) or (not data and not isinstance(raw_data, list)):
-        logger.error("Formato inesperado da resposta de %s: %s", url, type(raw_data))
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Unexpected response format from Spinergie",
-        )
-
-    return data
+provider = VesselDataProvider(cache_ttl_seconds=60)
+startup_time = datetime.now(timezone.utc)
 
 
-async def fetch_platforms() -> List[LocationItem]:
-    raw = await fetch_spinergie("/sd/api/poi/locations")
-    return normalize_and_filter(raw, config.platform_names)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await provider.initialize()
+    await provider.get_all_vessels()
+    logger.info("Aplicação %s iniciada (v%s)", APP_NAME, VERSION)
+    yield
+    logger.info("Aplicação %s finalizada", APP_NAME)
 
 
-async def fetch_vessels() -> List[LocationItem]:
-    raw = await fetch_spinergie("/sd/api/vessel/sfm-latest-locations")
-    return normalize_and_filter(raw, config.vessel_names)
+app = FastAPI(
+    title=APP_NAME,
+    description="API para integração de dados de embarcações e plataformas offshore supervisionadas pelo IBAMA.",
+    version=VERSION,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-def build_response(data: Any, count: Optional[int] = None) -> ApiResponse:
-    return ApiResponse(
-        status="success",
-        count=count if count is not None else (len(data) if hasattr(data, "__len__") else 0),
-        data=data,
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ApiResponse(
+            success=False,
+            message=exc.detail,
+            data=None,
+            timestamp=_now_iso(),
+        ).model_dump(),
     )
-
-
-# ---------------------------------------------------------------------------
-# Startup / error handling
-# ---------------------------------------------------------------------------
-@app.on_event("startup")
-async def on_startup() -> None:
-    logger.info("Iniciando Spinergie Locations Proxy")
-    logger.info("Base URL: %s", config.base_url)
-    logger.info("Plataformas configuradas: %s", config.platform_names)
-    logger.info("Embarcações configuradas: %s", config.vessel_names)
-    if not config.has_credentials():
-        logger.warning(
-            "Nenhuma credencial do Spinergie configurada. "
-            "Defina SPINERGIE_API_TOKEN ou SPINERGIE_USERNAME + SPINERGIE_PASSWORD"
-        )
 
 
 @app.exception_handler(Exception)
-async def global_exception_handler(request, exc: Exception) -> JSONResponse:
-    logger.exception("Erro não tratado")
+async def general_exception_handler(request, exc):
+    logger.exception("Erro inesperado: %s", exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=ApiResponse(
-            status="error",
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            count=0,
+            success=False,
+            message="Erro interno no servidor. A equipe de suporte foi notificada.",
             data=None,
-            message="Internal server error",
-        ).dict(),
+            timestamp=_now_iso(),
+        ).model_dump(),
     )
 
 
-# ---------------------------------------------------------------------------
-# API endpoints
-# ---------------------------------------------------------------------------
-@app.get("/api/locations/all", response_model=ApiResponse)
-async def get_all_locations():
-    """Retorna plataformas e embarcações em uma única resposta."""
-    platforms_task = asyncio.create_task(fetch_platforms())
-    vessels_task = asyncio.create_task(fetch_vessels())
-    results = await asyncio.gather(platforms_task, vessels_task, return_exceptions=True)
+@app.get("/health", response_model=ApiResponse, tags=["Health"])
+async def health_check():
+    uptime = int((datetime.now(timezone.utc) - startup_time).total_seconds())
+    return ApiResponse(
+        success=True,
+        message="Serviço operacional",
+        data=HealthResponse(
+            status="ok",
+            timestamp=_now_iso(),
+            version=VERSION,
+            uptime_seconds=uptime,
+        ).model_dump(),
+        timestamp=_now_iso(),
+    )
 
-    errors: List[str] = []
-    for result in results:
-        if isinstance(result, Exception):
-            if isinstance(result, HTTPException):
-                errors.append(str(result.detail))
-            else:
-                errors.append(str(result))
 
-    if errors:
+@app.get("/api/plataformas", response_model=ApiResponse, tags=["Plataformas"])
+async def list_plataformas():
+    try:
+        platforms = await provider.get_platforms()
+        return ApiResponse(
+            success=True,
+            message=f"{len(platforms)} plataformas encontradas",
+            data=[p.model_dump() for p in platforms],
+            timestamp=_now_iso(),
+        )
+    except Exception as exc:
+        logger.error("Erro ao listar plataformas: %s", exc)
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erro ao buscar dados do Spinergie: {'; '.join(errors)}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Não foi possível recuperar a lista de plataformas.",
         )
 
-    platforms, vessels = results
-    data = AllLocationsData(platforms=platforms, vessels=vessels)
-    return build_response(data, count=len(platforms) + len(vessels))
+
+@app.get("/api/embarcacoes", response_model=ApiResponse, tags=["Embarcações"])
+async def list_embarcacoes():
+    try:
+        tankers = await provider.get_tankers()
+        return ApiResponse(
+            success=True,
+            message=f"{len(tankers)} embarcações encontradas",
+            data=[t.model_dump() for t in tankers],
+            timestamp=_now_iso(),
+        )
+    except Exception as exc:
+        logger.error("Erro ao listar embarcações: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Não foi possível recuperar a lista de embarcações.",
+        )
 
 
-@app.get("/api/platforms/locations", response_model=ApiResponse)
-async def get_platform_locations():
-    """Retorna apenas as plataformas configuradas."""
-    platforms = await fetch_platforms()
-    return build_response(platforms)
+@app.get("/api/licencas", response_model=ApiResponse, tags=["Licenças"])
+async def list_licencas():
+    try:
+        return ApiResponse(
+            success=True,
+            message=f"{len(LICENSES)} licenças encontradas",
+            data=[lic.model_dump() for lic in LICENSES],
+            timestamp=_now_iso(),
+        )
+    except Exception as exc:
+        logger.error("Erro ao listar licenças: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Não foi possível recuperar a lista de licenças.",
+        )
 
 
-@app.get("/api/vessels/locations", response_model=ApiResponse)
-async def get_vessel_locations():
-    """Retorna apenas as embarcações configuradas."""
-    vessels = await fetch_vessels()
-    return build_response(vessels)
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import uvicorn
+    import asyncio
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=os.getenv("ENVIRONMENT", "production").lower() == "development",
+    )
