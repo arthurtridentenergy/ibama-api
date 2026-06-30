@@ -1,5 +1,5 @@
 pydantic>=2.13.0
-fastapi>=0.119.1
+fastapi>=0.138.1
 uvicorn[standard]>=0.34.0
 starlette>=0.46.0
 httpx>=0.28.1
