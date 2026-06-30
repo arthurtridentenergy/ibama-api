@@ -1,126 +1,337 @@
-import os
-import sys
+import asyncio
 import logging
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, status
-from fastapi.responses import PlainTextResponse
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ValidationError
 
 # ---------------------------------------------------------------------------
-# Configuração mínima e lazy de logging
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
-
-# Lazy logger pesado — carrega recursos custosos apenas na primeira chamada
-_lazy_logger = None
-
-
-def _get_lazy_logger():
-    """Inicializa pesadamente (handlers externos, formatos, etc.) sob demanda."""
-    global _lazy_logger
-    if _lazy_logger is None:
-        _lazy_logger = logging.getLogger("heavy_logging")
-        # Exemplo: adicionar handler complexo, saneamento, queue handler etc.
-        # Tudo que possa travar ou demorar no startup deve ficar aqui.
-    return _lazy_logger
+logger = logging.getLogger("spinergie_locations_proxy")
 
 
 # ---------------------------------------------------------------------------
-# Validação de variáveis críticas no startup
+# Configuration - read from environment variables
 # ---------------------------------------------------------------------------
-def _validate_critical_env() -> None:
-    """Garante que variáveis essenciais existam antes de subir o app."""
-    missing = []
-    for var in ("JWT_SECRET_KEY", "SPINERGIE_API_KEY"):
-        if not os.environ.get(var):
-            missing.append(var)
-    if missing:
-        msg = (
-            "\n"
-            "=" * 70
-            + "\n"
-            + "CRITICAL CONFIGURATION ERROR\n"
-            + "=" * 70
-            + "\n"
-            + "As seguintes variáveis de ambiente são obrigatórias e não foram definidas:\n"
-            + "\n".join(f"  - {var}" for var in missing)
-            + "\n"
-            + "Defina-as no painel do Render (Environment) e redeploye.\n"
-            + "=" * 70
+class AppConfig:
+    def __init__(self) -> None:
+        self.base_url = (os.getenv("SPINERGIE_BASE_URL") or "https://api.spinergie.com").rstrip("/")
+        self.username = os.getenv("SPINERGIE_USERNAME")
+        self.password = os.getenv("SPINERGIE_PASSWORD")
+        self.api_token = os.getenv("SPINERGIE_API_TOKEN")
+        self.timeout = int(os.getenv("SPINERGIE_TIMEOUT", "30"))
+        # Comma-separated names, easy to extend without touching the code.
+        self.platform_names = self._split(
+            os.getenv("SPINERGIE_PLATFORM_NAMES", "PCE-1,PPM-1,P-08,P-65")
         )
-        logger.error(msg)
-        raise RuntimeError(msg)
+        self.vessel_names = self._split(
+            os.getenv("SPINERGIE_VESSEL_NAMES", "Maersk Vega,Maersk Ventura")
+        )
+
+    @staticmethod
+    def _split(value: str) -> List[str]:
+        if not value:
+            return []
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    def has_credentials(self) -> bool:
+        return bool(self.api_token) or (bool(self.username) and bool(self.password))
+
+
+config = AppConfig()
 
 
 # ---------------------------------------------------------------------------
-# Lifespan: otimizado — sem pesado no __init__
-# ---------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Executa apenas o estritamente necessário antes de receber tráfego."""
-    _validate_critical_env()
-    logger.info("Startup concluído — variáveis críticas validadas.")
-    yield
-    logger.info("Shutdown iniciado.")
-
-
-# ---------------------------------------------------------------------------
-# App FastAPI
+# FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Spinergie API",
-    description="API otimizada para deploy no Render.",
+    title="Spinergie Locations Proxy",
+    description="Proxy para localizações de plataformas e embarcações do Spinergie",
     version="1.0.0",
-    lifespan=lifespan,
 )
 
 
-@app.get("/health", response_class=PlainTextResponse)
-async def health_check():
-    """Health check rápido para o Render (<100 ms). Não execute queries lentas."""
-    return PlainTextResponse(content="ok", status_code=status.HTTP_200_OK)
+# ---------------------------------------------------------------------------
+# Pydantic models / validation
+# ---------------------------------------------------------------------------
+class LocationItem(BaseModel):
+    """Item normalizado de localização. Campos extras do Spinergie são preservados."""
+
+    name: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+    class Config:
+        extra = "allow"
 
 
-@app.get("/ready", response_class=PlainTextResponse)
-async def readiness_check():
-    """Pronto para receber tráfego após startup."""
-    return PlainTextResponse(content="ready", status_code=status.HTTP_200_OK)
+class AllLocationsData(BaseModel):
+    platforms: List[LocationItem]
+    vessels: List[LocationItem]
+
+
+class ApiResponse(BaseModel):
+    status: str = "success"
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    count: int
+    data: Any
+    message: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# Importação lazy de rotas pesadas / lógicas de negócio
+# Helpers to normalize Spinergie responses
 # ---------------------------------------------------------------------------
-def _load_business_routers():
-    """Carrega routers pesados apenas quando necessário."""
-    # Exemplo: from app.routers import auth, vessels, spinergie
-    # app.include_router(auth.router, prefix="/auth")
-    # app.include_router(vessels.router, prefix="/vessels")
-    # app.include_router(spinergie.router, prefix="/spinergie")
-    _get_lazy_logger().info("Business routers carregados lazy.")
+LATITUDE_KEYS = ("latitude", "lat", "y", "Latitude", "Lat")
+LONGITUDE_KEYS = ("longitude", "lon", "lng", "x", "Longitude", "Long")
 
 
-_load_business_routers()
+def find_coordinate(obj: Any, keys: Tuple[str, ...]) -> Optional[float]:
+    """Busca latitude/longitude no dicionário principal ou em subdicionários comuns."""
+    if isinstance(obj, dict):
+        for key in keys:
+            value = obj.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        for nested in ("location", "position", "coordinates", "geo", "geometry"):
+            nested_value = obj.get(nested)
+            if isinstance(nested_value, dict):
+                found = find_coordinate(nested_value, keys)
+                if found is not None:
+                    return found
+    return None
+
+
+def find_name(item: Dict[str, Any]) -> Optional[str]:
+    for key in ("name", "vesselName", "platformName", "poiName", "Name"):
+        value = item.get(key)
+        if value:
+            return str(value).strip()
+    return None
+
+
+def normalize_and_filter(
+    raw_items: List[Dict[str, Any]], allowed_names: List[str]
+) -> List[LocationItem]:
+    """Filtra pelo nome configurado e valida/normaliza as coordenadas."""
+    allowed_set = {name.strip() for name in allowed_names}
+    results: List[LocationItem] = []
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            logger.warning("Item não-dict ignorado na resposta do Spinergie")
+            continue
+
+        name = find_name(item)
+        if not name:
+            logger.warning("Item sem nome ignorado")
+            continue
+
+        if allowed_set and name not in allowed_set:
+            continue
+
+        latitude = find_coordinate(item, LATITUDE_KEYS)
+        longitude = find_coordinate(item, LONGITUDE_KEYS)
+
+        if latitude is None or longitude is None:
+            logger.warning("'%s' ignorado: coordenadas ausentes ou inválidas", name)
+            continue
+
+        normalized = {"name": name, "latitude": latitude, "longitude": longitude}
+        for key, value in item.items():
+            if key not in normalized:
+                normalized[key] = value
+
+        try:
+            location = LocationItem(**normalized)
+            results.append(location)
+        except ValidationError as exc:
+            logger.warning("Erro de validação para '%s': %s", name, exc)
+            continue
+
+    results.sort(key=lambda loc: loc.name)
+    return results
 
 
 # ---------------------------------------------------------------------------
-# Entry point para Render
+# Spinergie HTTP client
+# ---------------------------------------------------------------------------
+def get_auth() -> Tuple[Dict[str, str], Optional[httpx.BasicAuth]]:
+    headers: Dict[str, str] = {}
+    auth: Optional[httpx.BasicAuth] = None
+    if config.api_token:
+        headers["Authorization"] = f"Bearer {config.api_token}"
+    elif config.username and config.password:
+        auth = httpx.BasicAuth(config.username, config.password)
+    return headers, auth
+
+
+def parse_list_response(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("data", "items", "results", "locations", "vessels", "platforms"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+async def fetch_spinergie(path: str) -> List[Dict[str, Any]]:
+    if not config.has_credentials():
+        logger.error("Credenciais do Spinergie não configuradas")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Spinergie credentials not configured",
+        )
+
+    headers, auth = get_auth()
+    url = f"{config.base_url}{path}"
+
+    async with httpx.AsyncClient(timeout=config.timeout, headers=headers) as client:
+        try:
+            response = await client.get(url, auth=auth)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error("Erro upstream %s em %s: %s", exc.response.status_code, url, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Upstream Spinergie returned status {exc.response.status_code}",
+            )
+        except httpx.RequestError as exc:
+            logger.error("Erro de requisição para %s: %s", url, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to reach Spinergie API",
+            )
+
+    try:
+        raw_data = response.json()
+    except ValueError as exc:
+        logger.error("JSON inválido de %s: %s", url, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid JSON response from Spinergie",
+        )
+
+    data = parse_list_response(raw_data)
+    if not isinstance(data, list) or (not data and not isinstance(raw_data, list)):
+        logger.error("Formato inesperado da resposta de %s: %s", url, type(raw_data))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unexpected response format from Spinergie",
+        )
+
+    return data
+
+
+async def fetch_platforms() -> List[LocationItem]:
+    raw = await fetch_spinergie("/sd/api/poi/locations")
+    return normalize_and_filter(raw, config.platform_names)
+
+
+async def fetch_vessels() -> List[LocationItem]:
+    raw = await fetch_spinergie("/sd/api/vessel/sfm-latest-locations")
+    return normalize_and_filter(raw, config.vessel_names)
+
+
+def build_response(data: Any, count: Optional[int] = None) -> ApiResponse:
+    return ApiResponse(
+        status="success",
+        count=count if count is not None else (len(data) if hasattr(data, "__len__") else 0),
+        data=data,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Startup / error handling
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def on_startup() -> None:
+    logger.info("Iniciando Spinergie Locations Proxy")
+    logger.info("Base URL: %s", config.base_url)
+    logger.info("Plataformas configuradas: %s", config.platform_names)
+    logger.info("Embarcações configuradas: %s", config.vessel_names)
+    if not config.has_credentials():
+        logger.warning(
+            "Nenhuma credencial do Spinergie configurada. "
+            "Defina SPINERGIE_API_TOKEN ou SPINERGIE_USERNAME + SPINERGIE_PASSWORD"
+        )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc: Exception) -> JSONResponse:
+    logger.exception("Erro não tratado")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=ApiResponse(
+            status="error",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            count=0,
+            data=None,
+            message="Internal server error",
+        ).dict(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/locations/all", response_model=ApiResponse)
+async def get_all_locations():
+    """Retorna plataformas e embarcações em uma única resposta."""
+    platforms_task = asyncio.create_task(fetch_platforms())
+    vessels_task = asyncio.create_task(fetch_vessels())
+    results = await asyncio.gather(platforms_task, vessels_task, return_exceptions=True)
+
+    errors: List[str] = []
+    for result in results:
+        if isinstance(result, Exception):
+            if isinstance(result, HTTPException):
+                errors.append(str(result.detail))
+            else:
+                errors.append(str(result))
+
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Erro ao buscar dados do Spinergie: {'; '.join(errors)}",
+        )
+
+    platforms, vessels = results
+    data = AllLocationsData(platforms=platforms, vessels=vessels)
+    return build_response(data, count=len(platforms) + len(vessels))
+
+
+@app.get("/api/platforms/locations", response_model=ApiResponse)
+async def get_platform_locations():
+    """Retorna apenas as plataformas configuradas."""
+    platforms = await fetch_platforms()
+    return build_response(platforms)
+
+
+@app.get("/api/vessels/locations", response_model=ApiResponse)
+async def get_vessel_locations():
+    """Retorna apenas as embarcações configuradas."""
+    vessels = await fetch_vessels()
+    return build_response(vessels)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8000"))
-    host = os.environ.get("HOST", "0.0.0.0")
-
-    logger.info("Iniciando uvicorn em %s:%d", host, port)
-
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        workers=1,
-        timeout_keep_alive=5,
-        log_level="info",
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
