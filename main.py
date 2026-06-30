@@ -4,7 +4,7 @@ import math
 import logging
 from datetime import datetime, timezone, timedelta
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 from collections import defaultdict
 
@@ -15,19 +15,19 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 import httpx
 
+from auth import authenticate_client, create_access_token
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 VERSION = "1.0.0"
 APP_NAME = "IBAMA Maritime Units API"
 
-
 class TipoUnidade(str, Enum):
     UNIDADE_PRODUCAO = "UNIDADE_PRODUCAO"
     UNIDADE_PERFURACAO = "UNIDADE_PERFURACAO"
     EMBARCACAO_APOIO = "EMBARCACAO_APOIO"
     EMBARCACAO_TRANSPORTE = "EMBARCACAO_TRANSPORTE"
-
 
 class UnidadeMaritima(BaseModel):
     id: str
@@ -37,7 +37,6 @@ class UnidadeMaritima(BaseModel):
     licenca: str
     latitude_base: float
     longitude_base: float
-
 
 class PosicaoAIS(BaseModel):
     mmsi: str
@@ -49,19 +48,16 @@ class PosicaoAIS(BaseModel):
     timestamp: str
     status: str
 
-
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
     expires_in: int
-
 
 class ErrorResponse(BaseModel):
     success: bool = False
     message: str
     data: None = None
     timestamp: str
-
 
 class ApiResponse(BaseModel):
     success: bool
@@ -70,19 +66,8 @@ class ApiResponse(BaseModel):
     timestamp: str
     version: str = VERSION
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-# =============================================
-# Internal data structures for simulação
-# =============================================
-
-class Coordinates(BaseModel):
-    lat: float = Field(..., ge=-90, le=90)
-    lon: float = Field(..., ge=-180, le=180)
-
 
 # Unidades fixas (plataformas)
 PLATFORMS_DATA = [
@@ -150,7 +135,6 @@ VESSEL_CONFIG = [
     },
 ]
 
-
 class VesselDataProvider:
     """Gerencia dados de posição com cache e simulador."""
 
@@ -190,7 +174,7 @@ class VesselDataProvider:
                 for plat in PLATFORMS_DATA:
                     if plat["mmsi"]:
                         merged[plat["mmsi"]] = PosicaoAIS(
-                            mmsi=plat["mmsi"],
+                            mmsi=str(plat["mmsi"]),
                             latitude=plat["latitude_base"],
                             longitude=plat["longitude_base"],
                             velocidade_nos=0.0,
@@ -226,7 +210,7 @@ class VesselDataProvider:
                     resp.raise_for_status()
                     payload = resp.json()
                     positions.append(PosicaoAIS(
-                        mmsi=mmsi,
+                        mmsi=str(mmsi),
                         latitude=float(payload["latitude"]),
                         longitude=float(payload["longitude"]),
                         velocidade_nos=float(payload.get("speed", 0.0)),
@@ -239,17 +223,17 @@ class VesselDataProvider:
                     logger.warning("Erro ao buscar MMSI %s: %s", mmsi, exc)
         return positions
 
-    ### def _simulate_positions(self) -> Dict[str, PosicaoAIS]:
+    def _simulate_positions(self) -> Dict[str, PosicaoAIS]:
         data: Dict[str, PosicaoAIS] = {}
         now = datetime.now(timezone.utc)
         t = now.timestamp() / 60.0
 
         # Plataformas fixas
         for plat in PLATFORMS_DATA:
-            if plat["mmsi"]:  # Algumas plataformas podem ter MMSI, usamos id como chave se não tiver
-                key = plat["mmsi"]
+            if plat["mmsi"]:
+                key = str(plat["mmsi"])
             else:
-                key = plat["id"]  # Chave interna para plataformas sem MMSI
+                key = plat["id"]
             data[key] = PosicaoAIS(
                 mmsi=key,
                 latitude=plat["latitude_base"],
@@ -266,7 +250,7 @@ class VesselDataProvider:
             radius = cfg["radius"]
             base_lat = cfg["base_lat"]
             base_lon = cfg["base_lon"]
-            mmsi = cfg["mmsi"]
+            mmsi = str(cfg["mmsi"])
 
             lat = base_lat + radius * math.cos((t + phase) / 10.0)
             lon = base_lon + radius * math.sin((t + phase) / 10.0)
@@ -284,29 +268,13 @@ class VesselDataProvider:
                 timestamp=_now_iso(),
                 status=status,
             )
-        return data ###
-
-def _simulate_positions(self):
-    data = {}
-    for key in self.positions:
-        data[key] = PosicaoAIS(
-            mmsi=str(key),  # ← CORRETO: converter para string
-            latitude=self.positions[key]["latitude"],
-            longitude=self.positions[key]["longitude"],
-            timestampAquisicao=datetime.now(timezone.utc).isoformat() + "Z",
-            status="FIXA",
-        )
-    return data
+        return data
 
 # Instância global do provider
 provider = VesselDataProvider(cache_ttl_seconds=60)
 startup_time = datetime.now(timezone.utc)
 
-
-# =============================================
 # Rate Limiter simples por IP
-# =============================================
-
 class RateLimiter:
     def __init__(self, max_requests: int = 100, window_seconds: int = 60):
         self.max_requests = max_requests
@@ -328,13 +296,7 @@ class RateLimiter:
             )
         self.requests[client_ip].append(now)
 
-
 rate_limiter = RateLimiter()
-
-
-# =============================================
-# FastAPI App e Middlewares
-# =============================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -342,7 +304,6 @@ async def lifespan(app: FastAPI):
     logger.info("Aplicação %s iniciada (v%s)", APP_NAME, VERSION)
     yield
     logger.info("Aplicação %s finalizada", APP_NAME)
-
 
 app = FastAPI(
     title=APP_NAME,
@@ -360,11 +321,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# =============================================
-# Tratamento de erros
-# =============================================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -389,37 +345,23 @@ async def general_exception_handler(request: Request, exc: Exception):
         ).model_dump(),
     )
 
-
-# =============================================
-# Endpoints OAuth2
-# =============================================
-
-# Simula um banco de clientes
-VALID_CLIENTS = {
-    "ibama": "secret",
-}
-
 @app.post("/v1/auth/token", response_model=TokenResponse, tags=["Autenticação"], dependencies=[Depends(rate_limiter)])
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     """Autenticação OAuth 2.0 Client Credentials."""
     client_id = form_data.username
     client_secret = form_data.password
-    if client_id not in VALID_CLIENTS or VALID_CLIENTS[client_id] != client_secret:
+    if not authenticate_client(client_id, client_secret):
         raise HTTPException(
             status_code=401,
             detail="Credenciais inválidas.",
         )
     # Em produção geraria um JWT; aqui retornamos um token fixo para demonstração
+    access_token = create_access_token(data={"sub": client_id})
     return TokenResponse(
-        access_token="fake-jwt-token-ibama",
+        access_token=access_token,
         token_type="bearer",
         expires_in=3600,
     )
-
-
-# =============================================
-# Endpoints IBAMA
-# =============================================
 
 @app.get("/v1/unidades", response_model=ApiResponse, tags=["Unidades"], dependencies=[Depends(rate_limiter)])
 async def list_unidades():
@@ -454,7 +396,6 @@ async def list_unidades():
         timestamp=_now_iso(),
     )
 
-
 @app.get("/v1/posicao/{mmsi}", response_model=ApiResponse, tags=["Posições"], dependencies=[Depends(rate_limiter)])
 async def get_posicao_by_mmsi(mmsi: str):
     """Obtém a última posição AIS de uma unidade pelo MMSI."""
@@ -468,7 +409,6 @@ async def get_posicao_by_mmsi(mmsi: str):
         data=pos.model_dump(),
         timestamp=_now_iso(),
     )
-
 
 @app.get("/health", response_model=ApiResponse, tags=["Saúde"])
 async def health_check():
@@ -485,11 +425,6 @@ async def health_check():
         },
         timestamp=_now_iso(),
     )
-
-
-# =============================================
-# Ponto de entrada
-# =============================================
 
 if __name__ == "__main__":
     import uvicorn
