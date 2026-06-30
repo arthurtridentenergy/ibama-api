@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 
@@ -252,42 +252,20 @@ rate_limiter = RateLimiter(
 # ---------------------------------------------------------------------------
 # Dependências de segurança
 # ---------------------------------------------------------------------------
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
-
-async def get_request_id(
-    request: Request,
-    x_request_id: str = Header(
-        ..., description="Identificador único da requisição (UUID recomendado)"
-    ),
-) -> str:
-    """Valida e armazena o X-Request-ID obrigatório."""
-    if not x_request_id or not x_request_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cabeçalho X-Request-ID é obrigatório",
-        )
-    request.state.request_id = x_request_id
-    return x_request_id
-
+security = HTTPBearer(auto_error=False)
 
 async def get_current_client(
-    request: Request,
-    token: str = Depends(oauth2_scheme),
-    x_request_id: str = Header(
-        ..., description="Identificador único da requisição (UUID recomendado)"
-    ),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> str:
     """Valida o token Bearer e retorna o identificador do cliente."""
-    request.state.request_id = x_request_id
-
-    if not token:
+    if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token de acesso não fornecido",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
+    token = credentials.credentials
     try:
         payload = jwt.decode(
             token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
@@ -304,7 +282,6 @@ async def get_current_client(
             detail="Token inválido ou expirado",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
     return client_id
 
 
@@ -438,24 +415,20 @@ async def general_exception_handler(request: Request, exc: Exception):
     response_description="Token JWT para autenticação nos endpoints protegidos",
 )
 async def auth_token(
-    request: Request,
     grant_type: str = Form(..., description="Deve ser 'client_credentials'"),
     client_id: str = Form(..., description="Client ID fornecido"),
     client_secret: str = Form(..., description="Client Secret fornecido"),
-    request_id: str = Depends(get_request_id),
 ):
     if grant_type != "client_credentials":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="grant_type deve ser 'client_credentials'",
         )
-
     if client_id != settings.CLIENT_ID or client_secret != settings.CLIENT_SECRET:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenciais do cliente inválidas",
         )
-
     access_token = create_access_token(data={"sub": client_id})
     return TokenResponse(
         access_token=access_token,
@@ -472,7 +445,7 @@ async def auth_token(
     summary="Listar unidades marítimas licenciadas",
     response_description="Lista de plataformas e unidades marítimas com licença LO1572/2020",
 )
-async def listar_unidades(request: Request):
+async def listar_unidades():
     return PLATAFORMAS
 
 
@@ -484,11 +457,10 @@ async def listar_unidades(request: Request):
     summary="Consultar posição AIS de embarcação",
     response_description="Posição atual simulada da embarcação identificada pelo MMSI",
 )
-async def obter_posicao(request: Request, mmsi: int):
+async def obter_posicao(mmsi: int):
     for embarcacao in EMBARCACOES:
         if embarcacao["mmsi"] == mmsi:
             return calcular_posicao(embarcacao, datetime.now(timezone.utc))
-
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Embarcação com MMSI {mmsi} não encontrada",
@@ -501,7 +473,7 @@ async def obter_posicao(request: Request, mmsi: int):
     summary="Health check da API",
     response_description="Status operacional e timestamp atual",
 )
-async def health_check(request: Request):
+async def health_check():
     return {
         "status": "ok",
         "timestamp": iso_timestamp(),
