@@ -1,170 +1,94 @@
-import asyncio
-import logging
-import math
+### config.py ###
 import os
-import json
-import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
-import jwt
-import requests
-from fastapi import FastAPI, HTTPException, Path, Depends, Request, Form
-from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+# Configurações carregadas de variáveis de ambiente
+SPINERGIE_BASE_URL: str = os.getenv("SPINERGIE_BASE_URL", "https://api.spinergie.com").rstrip("/")
+SPINERGIE_API_KEY: Optional[str] = os.getenv("SPINERGIE_API_KEY")
+JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "secret")
+ALGORITHM: str = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+CLIENT_ID: str = os.getenv("CLIENT_ID", "client")
+CLIENT_SECRET: str = os.getenv("CLIENT_SECRET", "secret")
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-def _configure_logging() -> None:
-    """Configura logging de acordo com a variável LOG_LEVEL."""
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+# Coordenadas hardcoded das plataformas (convertidas para decimal)
+# Origem: graus minutos -> decimal
+PPM_1_LAT: float = -22.798   # 22°47.88'S
+PPM_1_LON: float = -40.7625  # 40°45.75'W
+PCE_1_LAT: float = -22.708333  # 22°42.50'S
+PCE_1_LON: float = -40.693167  # 40°41.59'W
+P08_LAT: float = -22.673167  # 22°40.39'S
+P08_LON: float = -40.5465    # 40°32.79'W
+P65_LAT: float = -22.701833  # 22°42.11'S
+P65_LON: float = -40.67716   # 40°40.63'W
 
-
-_configure_logging()
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Configuração das APIs externas
-# ---------------------------------------------------------------------------
-TRIDENT_BASE_URL = os.getenv("TRIDENT_BASE_URL", "https://api.trident.example.com").rstrip("/")
-TRIDENT_API_KEY = os.getenv("TRIDENT_API_KEY")
-TRIDENT_API_PATH = os.getenv("TRIDENT_API_PATH", "/api/v1/position")
-
-SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://api.spinergie.com").rstrip("/")
-SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY")
-
-CACHE_TTL = timedelta(minutes=5)
-DISCREPANCY_THRESHOLD_KM = 3.0
-FLORIANOPOLIS_CENTER = (-27.595, -48.548)
-FLORIANOPOLIS_RADIUS_KM = 50.0
-
-# JWT and OAuth2 Client Credentials
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "secret")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-
-CLIENT_ID = os.getenv("CLIENT_ID", "client1")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "secret1")
-
-# ---------------------------------------------------------------------------
-# Coordenadas corretas das plataformas (conversão de graus/minutos para decimal)
-# ---------------------------------------------------------------------------
-PPM_1_LAT = -(22 + 47.88 / 60)
-PPM_1_LON = -(40 + 45.75 / 60)
-PCE_1_LAT = -(22 + 42.50 / 60)
-PCE_1_LON = -(40 + 41.59 / 60)
-P08_LAT = -(22 + 40.39 / 60)
-P08_LON = -(40 + 32.79 / 60)
-P65_LAT = -(22 + 42.11 / 60)
-P65_LON = -(40 + 40.63 / 60)
-
-P08_MMSI = os.getenv("P08_MMSI", "000000008")
-P65_MMSI = os.getenv("P65_MMSI", "000000065")
-
-PLATAFORMAS_FIXAS: Dict[str, str] = {
-    "PPM-1": "PPM-1",
-    "PCE-1": "PCE-1",
-    P08_MMSI: "P-08",
-    P65_MMSI: "P-65",
+# Mapeamento de nomes de plataformas
+PLATAFORMAS_FIXAS = {
+    "PPM-1": {"nome": "PPM-1", "latitude": PPM_1_LAT, "longitude": PPM_1_LON},
+    "PCE-1": {"nome": "PCE-1", "latitude": PCE_1_LAT, "longitude": PCE_1_LON},
+    "P-08": {"nome": "P-08", "latitude": P08_LAT, "longitude": P08_LON},
+    "P-65": {"nome": "P-65", "latitude": P65_LAT, "longitude": P65_LON},
 }
 
-COORDENADAS_PLATAFORMAS: Dict[str, Dict[str, float]] = {
-    "PPM-1": {
-        "latitude": float(os.getenv("PPM_1_LATITUDE", str(PPM_1_LAT))),
-        "longitude": float(os.getenv("PPM_1_LONGITUDE", str(PPM_1_LON))),
-    },
-    "PCE-1": {
-        "latitude": float(os.getenv("PCE_1_LATITUDE", str(PCE_1_LAT))),
-        "longitude": float(os.getenv("PCE_1_LONGITUDE", str(PCE_1_LON))),
-    },
-    "P-08": {
-        "latitude": float(os.getenv("P08_LATITUDE", str(P08_LAT))),
-        "longitude": float(os.getenv("P08_LONGITUDE", str(P08_LON))),
-    },
-    "P-65": {
-        "latitude": float(os.getenv("P65_LATITUDE", str(P65_LAT))),
-        "longitude": float(os.getenv("P65_LONGITUDE", str(P65_LON))),
-    },
+# MMSIs das plataformas (necessários para consulta externa, se existir)
+PLATAFORMAS_MMSI = {
+    "P-08": os.getenv("P08_MMSI", "538001903"),
+    "P-65": os.getenv("P65_MMSI", "538003593"),
 }
 
-logger.info(f"Plataformas fixas configuradas: {list(PLATAFORMAS_FIXAS.values())}")
+# Embarcações móveis monitoradas via Spinergie
+VESSEL_NAMES = ["MAERSK VEGA", "MAERSK VENTURA"]
+VESSEL_MMSI = {
+    "MAERSK VEGA": os.getenv("MAERSK_VEGA_MMSI", "710001720"),
+    "MAERSK VENTURA": os.getenv("MAERSK_VENTURA_MMSI", "710002450"),
+}
 
+### models.py ###
+from pydantic import BaseModel, Field
+from typing import Optional, List
+from datetime import datetime
 
-# ---------------------------------------------------------------------------
-# Modelos Pydantic
-# ---------------------------------------------------------------------------
-class UnidadeMaritima(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={
+class Conformidade(BaseModel):
+    """Informações de conformidade IBAMA para uma plataforma ou embarcação."""
+    plataforma_embarcacao: str = Field(..., description="Nome da plataforma ou embarcação")
+    mmsi: Optional[str] = Field(None, description="MMSI (para embarcações)")
+    licenca: str = Field(..., description="Número da licença ambiental")
+    validade: Optional[str] = Field(None, description="Data de validade da licença (formato DD/MM/AAAA)")
+    observacao: Optional[str] = Field(None, description="Observações adicionais")
+
+    class Config:
+        json_schema_extra = {
             "example": {
-                "mmsi": "P-65",
-                "nome": "P-65",
-                "tipoUnidade": "PLATAFORMA_FIXA",
-                "ativo": True,
+                "plataforma_embarcacao": "PPM-1",
+                "mmsi": None,
+                "licenca": "LO1572/2020",
+                "validade": "11/7/2024",
+                "observacao": ""
             }
         }
-    )
-
-    mmsi: str = Field(..., description="MMSI ou identificador da unidade")
-    nome: str = Field(..., description="Nome da unidade marítima")
-    tipoUnidade: str = Field(default="EMBARCACAO", description="Tipo da unidade")
-    ativo: bool = Field(default=True, description="Indica se a unidade está ativa")
-    latitudeFixa: Optional[float] = Field(default=None, description="Latitude fixa (plataformas)")
-    longitudeFixa: Optional[float] = Field(default=None, description="Longitude fixa (plataformas)")
 
 
-class PosicaoAIS(BaseModel):
-    mmsi: str
-    nome: str
+class PosicaoResponse(BaseModel):
+    """Resposta de posição geográfica."""
+    identificador: str = Field(..., description="MMSI, nome da plataforma ou nome da embarcação")
+    nome: str = Field(..., description="Nome da unidade")
     latitude: float
     longitude: float
-    timestampAquisicao: str
+    timestamp_aquisicao: str = Field(..., description="ISO 8601 UTC")
+    fonte: str = Field(..., description="Fonte dos dados (coordenada_fixa, spinergie)")
 
-
-class VesselPositionResponse(BaseModel):
-    model_config = ConfigDict(
-        json_schema_extra={
+    class Config:
+        json_schema_extra = {
             "example": {
-                "mmsi": "P-65",
+                "identificador": "P-65",
                 "nome": "P-65",
-                "latitude": P65_LAT,
-                "longitude": P65_LON,
-                "timestampAquisicao": "2026-06-25T13:56:11+00:00",
-                "fonte": "trident",
+                "latitude": -22.701833,
+                "longitude": -40.67716,
+                "timestamp_aquisicao": "2024-07-11T12:00:00+00:00",
+                "fonte": "coordenada_fixa"
             }
         }
-    )
-
-    mmsi: str = Field(
-        ...,
-        description="MMSI da embarcação ou identificador da plataforma",
-        example="P-65",
-    )
-    nome: str = Field(..., description="Nome da embarcação ou plataforma", example="P-65")
-    latitude: float = Field(..., description="Latitude da posição", example=P65_LAT)
-    longitude: float = Field(..., description="Longitude da posição", example=P65_LON)
-    timestampAquisicao: str = Field(
-        ...,
-        description="Data e hora da aquisição da posição no formato ISO 8601",
-        example="2026-06-25T13:56:11+00:00",
-    )
-    fonte: str = Field(
-        default="desconhecida",
-        description="Fonte dos dados (trident, spinergie, coordenada_fixa, fallback_local)",
-        example="trident",
-    )
-
-
-class ErrorResponse(BaseModel):
-    detail: str = Field(..., description="Mensagem descritiva do erro")
 
 
 class TokenResponse(BaseModel):
@@ -172,267 +96,270 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
-# ---------------------------------------------------------------------------
-# Registro de unidades marítimas
-# ---------------------------------------------------------------------------
-UNIDADES_REGISTRY: List[Dict[str, Any]] = [
-    {
-        "mmsi": "PPM-1",
-        "nome": "PPM-1",
-        "tipoUnidade": "PLATAFORMA_FIXA",
-        "ativo": True,
-    },
-    {
-        "mmsi": "PCE-1",
-        "nome": "PCE-1",
-        "tipoUnidade": "PLATAFORMA_FIXA",
-        "ativo": True,
-    },
-    {
-        "mmsi": P08_MMSI,
-        "nome": "P-08",
-        "tipoUnidade": "PLATAFORMA_FIXA",
-        "ativo": True,
-    },
-    {
-        "mmsi": P65_MMSI,
-        "nome": "P-65",
-        "tipoUnidade": "PLATAFORMA_FIXA",
-        "ativo": True,
-    },
-    {
-        "mmsi": "710001720",
-        "nome": "MAERSK VEGA",
-        "tipoUnidade": "EMBARCACAO",
-        "ativo": True,
-    },
-    {
-        "mmsi": "123456789",
-        "nome": "Navio Emergência Alpha",
-        "tipoUnidade": "EMBARCACAO_EMERGENCIA",
-        "ativo": True,
-    },
+class ErrorResponse(BaseModel):
+    detail: str
+
+
+### services.py ###
+import math
+import asyncio
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+import httpx
+
+from config import (
+    SPINERGIE_BASE_URL, SPINERGIE_API_KEY,
+    PLATAFORMAS_FIXAS, PLATAFORMAS_MMSI,
+    VESSEL_MMSI, VESSEL_NAMES,
+    DISCREPANCY_THRESHOLD_KM
+)
+
+logger = logging.getLogger(__name__)
+
+# Cache simples em memória (TTL de 5 minutos)
+_cache: Dict[str, Dict[str, Any]] = {}
+CACHE_TTL = timedelta(minutes=5)
+
+# Limiar para alerta de discrepância (km)
+DISCREPANCY_THRESHOLD_KM = 3.0
+
+# Dados da tabela IBAMA (hardcoded conforme especificação)
+TABELA_IBAMA: List[Conformidade] = [
+    Conformidade(plataforma_embarcacao="PPM-1", mmsi=None, licenca="LO1572/2020", validade="11/7/2024", observacao=""),
+    Conformidade(plataforma_embarcacao="PCE-1", mmsi=None, licenca="LO1572/2020", validade="11/7/2024", observacao=""),
+    Conformidade(plataforma_embarcacao="P-08", mmsi="538001903", licenca="LO1572/2020", validade="11/7/2024", observacao=""),
+    Conformidade(plataforma_embarcacao="P-65", mmsi="538003593", licenca="LO1572/2020", validade="11/7/2024", observacao=""),
+    Conformidade(plataforma_embarcacao="MAERSK VENTURA", mmsi="710002450", licenca="LO1572/2020", validade=None, observacao=""),
+    Conformidade(plataforma_embarcacao="MAERSK VEGA", mmsi="710001720", licenca="LO1572/2020", validade=None, observacao=""),
 ]
 
 
-# ---------------------------------------------------------------------------
-# Caches
-# ---------------------------------------------------------------------------
-_trident_cache: Dict[str, Dict[str, Any]] = {}
-_spinergie_cache: Dict[str, Dict[str, Any]] = {}
+def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calcula a distância em km usando a fórmula de Haversine."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calcula a distância em quilômetros entre dois pontos geográficos."""
-    earth_radius_km = 6371.0
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dphi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return earth_radius_km * c
+def _is_cache_valid(key: str) -> bool:
+    """Verifica se há entrada de cache válida para a chave."""
+    if key in _cache:
+        entry = _cache[key]
+        return datetime.now(timezone.utc) - entry["timestamp"] < CACHE_TTL
+    return False
 
 
-def _is_valid_coordinate(lat: Any, lon: Any) -> bool:
-    """Valida se as coordenadas são reais e não correspondem a valores padrão/nulos."""
-    if lat is None or lon is None:
-        return False
+def _set_cache(key: str, data: Any) -> None:
+    """Armazena no cache com timestamp."""
+    _cache[key] = {"data": data, "timestamp": datetime.now(timezone.utc)}
+
+
+async def _call_spinergie_api(mmsi: str) -> Optional[Dict[str, Any]]:
+    """Realiza a chamada à API Spinergie para obter a posição mais recente da embarcação."""
+    if not SPINERGIE_API_KEY:
+        logger.error("SPINERGIE_API_KEY não configurada. Não será possível consultar Spinergie.")
+        return None
+
+    url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
+    headers = {
+        "Authorization": f"ApiKey {SPINERGIE_API_KEY}",
+        "Accept": "application/json",
+    }
+    params = {"mmsi": mmsi}
+
+    logger.info(f"Consultando Spinergie para MMSI {mmsi}")
     try:
-        lat_f = float(lat)
-        lon_f = float(lon)
-    except (TypeError, ValueError):
-        return False
-
-    if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0):
-        return False
-
-    if abs(lat_f) < 1e-6 and abs(lon_f) < 1e-6:
-        logger.debug("Coordenada (0,0) rejeitada como inválida")
-        return False
-
-    dist_floripa = _haversine_distance_km(
-        lat_f, lon_f, FLORIANOPOLIS_CENTER[0], FLORIANOPOLIS_CENTER[1]
-    )
-    if dist_floripa < FLORIANOPOLIS_RADIUS_KM:
-        logger.debug(
-            f"Coordenada ({lat_f}, {lon_f}) rejeitada por estar em Florianópolis "
-            f"(distância: {dist_floripa:.2f} km)"
-        )
-        return False
-
-    return True
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list):
+                    return data[0] if data else None
+                elif isinstance(data, dict):
+                    return data
+                else:
+                    logger.warning(f"Resposta inesperada do Spinergie para {mmsi}: {data}")
+                    return None
+            else:
+                logger.error(f"Spinergie retornou {response.status_code} para {mmsi}")
+                return None
+    except httpx.HTTPError as e:
+        logger.exception(f"Erro de rede ao consultar Spinergie para {mmsi}: {e}")
+        return None
+    except Exception as e:
+        logger.exception(f"Erro inesperado na chamada Spinergie para {mmsi}: {e}")
+        return None
 
 
-def _resolve_identificador(identificador: str) -> str:
+async def _get_vessel_position(mmsi: str, nome: str) -> Optional[Dict[str, Any]]:
+    """Obtém a posição de uma embarcação via Spinergie, com cache."""
+    cache_key = f"vessel_{mmsi}"
+    if _is_cache_valid(cache_key):
+        logger.debug(f"Retornando posição do cache para {mmsi}")
+        return _cache[cache_key]["data"]
+
+    raw = await _call_spinergie_api(mmsi)
+    if raw:
+        # Normalizar campos
+        latitude = raw.get("latitude") or raw.get("lat")
+        longitude = raw.get("longitude") or raw.get("lon") or raw.get("lng")
+        timestamp = raw.get("timestamp") or raw.get("lastReceived") or datetime.now(timezone.utc).isoformat()
+
+        if latitude is None or longitude is None:
+            logger.warning(f"Coordenadas ausentes na resposta para {mmsi}")
+            return None
+
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+        except (TypeError, ValueError):
+            logger.warning(f"Coordenadas inválidas para {mmsi}")
+            return None
+
+        pos = {
+            "identificador": mmsi,
+            "nome": nome,
+            "latitude": latitude,
+            "longitude": longitude,
+            "timestamp_aquisicao": timestamp,
+            "fonte": "spinergie"
+        }
+        _set_cache(cache_key, pos)
+        logger.info(f"Posição obtida para {mmsi} ({nome}): ({latitude}, {longitude})")
+        return pos
+    return None
+
+
+def _get_platform_position(nome: str) -> Optional[Dict[str, Any]]:
+    """Retorna a posição fixa de uma plataforma, se cadastrada."""
+    if nome in PLATAFORMAS_FIXAS:
+        plat = PLATAFORMAS_FIXAS[nome]
+        return {
+            "identificador": nome,
+            "nome": nome,
+            "latitude": plat["latitude"],
+            "longitude": plat["longitude"],
+            "timestamp_aquisicao": datetime.now(timezone.utc).isoformat(),
+            "fonte": "coordenada_fixa"
+        }
+    return None
+
+
+async def get_position(identificador: str) -> Optional[Dict[str, Any]]:
+    """Obtém a posição para qualquer identificador (plataforma, MMSI ou nome de embarcação).
+    
+    Primeiro tenta como plataforma fixa, depois como embarcação via nome ou MMSI.
     """
-    Resolve o identificador para um MMSI válido. Suporta MMSI numérico de 9 dígitos,
-    IDs de plataformas fixas (PPM-1, PCE-1, P-08, P-65) e nomes de embarcações.
-    """
-    if not identificador:
-        raise HTTPException(status_code=400, detail="Identificador é obrigatório.")
-
-    # Verifica se é uma plataforma fixa conhecida
-    if identificador in PLATAFORMAS_FIXAS:
-        return identificador
-
-    # Verifica se é um MMSI numérico de 9 dígitos
+    # Verificar se é uma plataforma (por nome exato)
+    ident_upper = identificador.upper()
+    if ident_upper in PLATAFORMAS_FIXAS:
+        return _get_platform_position(ident_upper)
+    
+    # Verificar se é uma plataforma pelo MMSI (caso informado como MMSI)
+    for plat_nome, plat_mmsi in PLATAFORMAS_MMSI.items():
+        if identificador == plat_mmsi:
+            return _get_platform_position(plat_nome)
+    
+    # Verificar se é um nome de embarcação conhecido
+    nome_vessel = None
+    for nome in VESSEL_NAMES:
+        if nome.upper() == ident_upper:
+            nome_vessel = nome
+            break
+    if nome_vessel:
+        mmsi = VESSEL_MMSI.get(nome_vessel)
+        if mmsi:
+            return await _get_vessel_position(mmsi, nome_vessel)
+        else:
+            logger.error(f"MMSI não configurado para {nome_vessel}")
+            return None
+    
+    # Se for um MMSI numérico, verificar se pertence a alguma embarcação
     if identificador.isdigit() and len(identificador) == 9:
-        return identificador
-
-    # Busca por nome
-    for unit in UNIDADES_REGISTRY:
-        if unit.get("nome", "").upper() == identificador.upper():
-            return unit["mmsi"]
-
-    raise HTTPException(status_code=400, detail=f"Identificador inválido ou não encontrado: '{identificador}'.")
-
-
-def _normalizar_nome(identificador: str, nome_original: Optional[str] = None) -> str:
-    """Retorna o nome correto da plataforma ou embarcação."""
-    nome_corrigido = PLATAFORMAS_FIXAS.get(identificador)
-    if nome_corrigido:
-        return nome_corrigido
-
-    if nome_original:
-        return nome_original
-
-    for unidade in UNIDADES_REGISTRY:
-        if unidade["mmsi"] == identificador:
-            return unidade["nome"]
-
-    return identificador
+        for nome, mmsi in VESSEL_MMSI.items():
+            if mmsi == identificador:
+                return await _get_vessel_position(mmsi, nome)
+    
+    # Nenhum reconhecido
+    logger.warning(f"Identificador não reconhecido: {identificador}")
+    return None
 
 
-def _normalizar_unidade(unidade: UnidadeMaritima) -> UnidadeMaritima:
-    """Garante que plataformas fixas apareçam com os nomes oficiais."""
-    nome_corrigido = PLATAFORMAS_FIXAS.get(unidade.mmsi)
-    if not nome_corrigido or unidade.nome == nome_corrigido:
-        return unidade
-    return unidade.model_copy(update={"nome": nome_corrigido})
+def get_conformidade_table() -> List[Conformidade]:
+    """Retorna a tabela de conformidade IBAMA completa."""
+    return TABELA_IBAMA
 
 
-def _get_fixed_position(identificador: str) -> Optional[Dict[str, Any]]:
-    """Monta a posição a partir das coordenadas fixas cadastradas."""
-    nome = PLATAFORMAS_FIXAS.get(identificador)
-    if not nome:
-        return None
-
-    coords = COORDENADAS_PLATAFORMAS.get(nome)
-    if not coords:
-        return None
-
-    return {
-        "mmsi": identificador,
-        "nome": nome,
-        "latitude": coords["latitude"],
-        "longitude": coords["longitude"],
-        "timestampAquisicao": datetime.now(timezone.utc).isoformat(),
-        "fonte": "coordenada_fixa",
-    }
+def get_plataformas() -> List[Conformidade]:
+    """Retorna apenas as plataformas da tabela IBAMA."""
+    return [item for item in TABELA_IBAMA if item.plataforma_embarcacao in PLATAFORMAS_FIXAS]
 
 
-def _converter_posicao_mock(
-    posicao: PosicaoAIS, mmsi: str, fonte: str = "fallback_local"
-) -> VesselPositionResponse:
-    """Converte uma posição mock em VesselPositionResponse."""
-    return VesselPositionResponse(
-        mmsi=posicao.mmsi,
-        nome=posicao.nome,
-        latitude=posicao.latitude,
-        longitude=posicao.longitude,
-        timestampAquisicao=posicao.timestampAquisicao,
-        fonte=fonte,
-    )
+def get_embarcacoes() -> List[Conformidade]:
+    """Retorna apenas as embarcações da tabela IBAMA."""
+    return [item for item in TABELA_IBAMA if item.plataforma_embarcacao not in PLATAFORMAS_FIXAS]
 
 
-def _is_cache_valid(cache: Dict[str, Dict[str, Any]], key: str) -> bool:
-    """Verifica se existe cache válido para a chave informada."""
-    entry = cache.get(key)
-    if not entry:
-        return False
-    return datetime.now(timezone.utc) - entry["timestamp"] < CACHE_TTL
+### main.py ###
+import logging
+import os
+from typing import Optional
+from datetime import datetime, timedelta, timezone
 
+from fastapi import FastAPI, HTTPException, Depends, Path, Form
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from jose import jwt, JWTError
 
-def _set_cache(cache: Dict[str, Dict[str, Any]], key: str, value: Any) -> None:
-    """Armazena um valor no cache."""
-    cache[key] = {"data": value, "timestamp": datetime.now(timezone.utc)}
+from config import (
+    JWT_SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES,
+    CLIENT_ID, CLIENT_SECRET, LOG_LEVEL
+)
+from models import Conformidade, PosicaoResponse, TokenResponse, ErrorResponse
+from services import get_position, get_conformidade_table, get_plataformas, get_embarcacoes
 
+# Configuração de logging
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-def _normalize_api_response(
-    raw: Any,
-    identificador: str,
-    fonte: str,
-) -> Optional[Dict[str, Any]]:
-    """Converte a resposta bruta de uma API para o formato interno."""
-    if not raw or not isinstance(raw, dict):
-        return None
+app = FastAPI(
+    title="IBAMA API - Monitoramento de Embarcações e Plataformas",
+    description="API para consulta de conformidade ambiental e posições de plataformas e embarcações.",
+    version="1.0.0",
+    docs_url="/docs",
+    openapi_url="/openapi.json",
+)
 
-    mmsi = str(raw.get("mmsi") or identificador)
-    nome = raw.get("vesselName") or raw.get("name") or raw.get("nome")
-    nome = _normalizar_nome(identificador, nome)
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    latitude = raw.get("latitude") or raw.get("lat")
-    longitude = raw.get("longitude") or raw.get("lon") or raw.get("lng")
-
-    try:
-        latitude = float(latitude) if latitude is not None else None
-        longitude = float(longitude) if longitude is not None else None
-    except (TypeError, ValueError) as exc:
-        logger.warning(f"Coordenadas inválidas para {identificador}: {exc}")
-        latitude = None
-        longitude = None
-
-    if latitude is None or longitude is None:
-        return None
-
-    timestamp = (
-        raw.get("timestamp")
-        or raw.get("timestampAquisicao")
-        or raw.get("lastReceived")
-        or datetime.now(timezone.utc).isoformat()
-    )
-
-    return {
-        "mmsi": mmsi,
-        "nome": nome,
-        "latitude": latitude,
-        "longitude": longitude,
-        "timestampAquisicao": timestamp,
-        "fonte": fonte,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Segurança: Autenticação JWT
-# ---------------------------------------------------------------------------
+# Segurança
 security = HTTPBearer(auto_error=False)
-
 
 def authenticate_client(client_id: str, client_secret: str) -> bool:
     """Verifica as credenciais do cliente."""
     return client_id == CLIENT_ID and client_secret == CLIENT_SECRET
-
 
 def create_access_token(data: dict) -> str:
     """Cria um token JWT."""
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
 
-
-def get_current_client_id(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> str:
+def get_current_client_id(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> str:
     """Valida o token JWT e retorna o client_id."""
     if credentials is None:
         raise HTTPException(status_code=401, detail="Token de autorização ausente")
@@ -443,318 +370,17 @@ def get_current_client_id(
         if client_id is None:
             raise HTTPException(status_code=401, detail="Token inválido")
         return client_id
-    except jwt.PyJWTError:
+    except JWTError:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
-
-
-# ---------------------------------------------------------------------------
-# Fontes de dados: Trident e Spinergie (síncronas com requests)
-# ---------------------------------------------------------------------------
-def _call_trident_api(identificador: str) -> Optional[Any]:
-    """Executa a chamada HTTP ao endpoint da Trident."""
-    if not TRIDENT_API_KEY:
-        logger.error("Variável de ambiente TRIDENT_API_KEY não configurada")
-        return None
-
-    url = f"{TRIDENT_BASE_URL}{TRIDENT_API_PATH}"
-    headers = {
-        "Authorization": f"ApiKey {TRIDENT_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    params = {"mmsi": identificador}
-    timeout = 15
-
-    logger.info(f"Consultando Trident para {identificador} - URL: {url}")
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=timeout)
-        logger.debug(f"Trident respondeu {response.status_code} para {identificador}")
-
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"Resposta bruta da Trident para {identificador}: {data}")
-            if isinstance(data, list):
-                return data[0] if data else None
-            if isinstance(data, dict):
-                return data
-            return None
-
-        if response.status_code == 401:
-            logger.error("Falha de autenticação na API Trident (401). Verifique TRIDENT_API_KEY")
-        elif response.status_code == 403:
-            logger.error("Acesso negado à API Trident (403)")
-        elif response.status_code == 404:
-            logger.warning(f"Embarcação não encontrada na Trident (404) para {identificador}")
-        elif response.status_code >= 500:
-            logger.error(f"Erro no servidor Trident ({response.status_code}) para {identificador}")
-        else:
-            logger.error(
-                f"Resposta inesperada da Trident ({response.status_code}) para {identificador}: {response.text}"
-            )
-
-        return None
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout ao consultar Trident para {identificador}")
-        return None
-    except requests.exceptions.RequestException as exc:
-        logger.error(f"Erro de conexão com Trident para {identificador}: {exc}")
-        return None
-
-
-def _call_spinergie_api(identificador: str) -> Optional[Any]:
-    """Executa a chamada HTTP ao endpoint da Spinergie."""
-    if not SPINERGIE_API_KEY:
-        logger.error("Variável de ambiente SPINERGIE_API_KEY não configurada")
-        return None
-
-    url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
-    headers = {
-        "Authorization": f"ApiKey {SPINERGIE_API_KEY}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    params = {"mmsi": identificador}
-    timeout = 15
-
-    logger.info(f"Consultando Spinergie para {identificador} - URL: {url}")
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=timeout)
-        logger.debug(f"Spinergie respondeu {response.status_code} para {identificador}")
-
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"Resposta bruta da Spinergie para {identificador}: {data}")
-            if isinstance(data, list):
-                return data[0] if data else None
-            if isinstance(data, dict):
-                return data
-            return None
-
-        if response.status_code == 401:
-            logger.error("Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY")
-        elif response.status_code == 403:
-            logger.error("Acesso negado à API Spinergie (403)")
-        elif response.status_code == 404:
-            logger.warning(f"Embarcação não encontrada no Spinergie (404) para {identificador}")
-        elif response.status_code >= 500:
-            logger.error(f"Erro no servidor Spinergie ({response.status_code}) para {identificador}")
-        else:
-            logger.error(
-                f"Resposta inesperada do Spinergie ({response.status_code}) para {identificador}: {response.text}"
-            )
-
-        return None
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout ao consultar Spinergie para {identificador}")
-        return None
-    except requests.exceptions.RequestException as exc:
-        logger.error(f"Erro de conexão com Spinergie para {identificador}: {exc}")
-        return None
-
-
-async def fetch_trident_position_async(identificador: str) -> Optional[Dict[str, Any]]:
-    """Busca a posição na Trident com cache e normalização (assíncrono)."""
-    if _is_cache_valid(_trident_cache, identificador):
-        logger.debug(f"Retornando posição do cache Trident para {identificador}")
-        return _trident_cache[identificador]["data"]
-
-    raw = await asyncio.to_thread(_call_trident_api, identificador)
-    position = _normalize_api_response(raw, identificador, "trident")
-    if position:
-        _set_cache(_trident_cache, identificador, position)
-        logger.info(f"Posição Trident obtida para {identificador}: ({position['latitude']}, {position['longitude']})")
-    return position
-
-
-async def fetch_spinergie_position_async(identificador: str) -> Optional[Dict[str, Any]]:
-    """Busca a posição no Spinergie com cache e normalização (assíncrono)."""
-    if _is_cache_valid(_spinergie_cache, identificador):
-        logger.debug(f"Retornando posição do cache Spinergie para {identificador}")
-        return _spinergie_cache[identificador]["data"]
-
-    raw = await asyncio.to_thread(_call_spinergie_api, identificador)
-    position = _normalize_api_response(raw, identificador, "spinergie")
-    if position:
-        _set_cache(_spinergie_cache, identificador, position)
-        logger.info(f"Posição Spinergie obtida para {identificador}: ({position['latitude']}, {position['longitude']})")
-    return position
-
-
-# ---------------------------------------------------------------------------
-# Dados locais (compatibilidade / testes)
-# ---------------------------------------------------------------------------
-def get_all_vessels() -> List[UnidadeMaritima]:
-    """Retorna a lista de unidades marítimas cadastradas."""
-    unidades: List[UnidadeMaritima] = []
-    for item in UNIDADES_REGISTRY:
-        if not item.get("ativo", True):
-            continue
-        unidades.append(UnidadeMaritima(**item))
-    return unidades
-
-
-def get_vessel_position(mmsi: str) -> Optional[PosicaoAIS]:
-    """Retorna posições mock locais quando as APIs externas não têm dados."""
-    mock_positions: Dict[str, Dict[str, Any]] = {}
-    pos = mock_positions.get(mmsi)
-    if pos:
-        return PosicaoAIS(**pos)
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Resolução de posição com fallback inteligente (assíncrono)
-# ---------------------------------------------------------------------------
-async def _resolver_posicao(identificador: str) -> Optional[Dict[str, Any]]:
-    """
-    Orquestra a busca de posição priorizando Trident, depois Spinergie e,
-    por fim, as coordenadas fixas cadastradas. Valida coordenadas e registra
-    discrepâncias entre as fontes.
-    """
-    fixed = _get_fixed_position(identificador)
-
-    # 1) Tenta Trident (fonte primária)
-    trident_pos: Optional[Dict[str, Any]] = None
-    try:
-        trident_pos = await fetch_trident_position_async(identificador)
-        if trident_pos and not _is_valid_coordinate(
-            trident_pos["latitude"], trident_pos["longitude"]
-        ):
-            logger.warning(
-                f"Trident retornou coordenadas inválidas para {identificador} "
-                f"({trident_pos['latitude']}, {trident_pos['longitude']}); descartando"
-            )
-            trident_pos = None
-        elif trident_pos:
-            logger.info(f"Trident retornou posição válida para {identificador}")
-    except Exception as exc:
-        logger.exception(f"Erro ao consultar Trident para {identificador}: {exc}")
-
-    if trident_pos:
-        # Compara com Spinergie (quando disponível) para detectar discrepâncias
-        spinergie_pos: Optional[Dict[str, Any]] = None
-        try:
-            spinergie_pos = await fetch_spinergie_position_async(identificador)
-            if spinergie_pos and not _is_valid_coordinate(
-                spinergie_pos["latitude"], spinergie_pos["longitude"]
-            ):
-                logger.warning(
-                    f"Spinergie retornou coordenadas inválidas para {identificador}; descartando"
-                )
-                spinergie_pos = None
-        except Exception as exc:
-            logger.exception(f"Erro ao consultar Spinergie para {identificador}: {exc}")
-
-        if spinergie_pos:
-            distancia = _haversine_distance_km(
-                trident_pos["latitude"],
-                trident_pos["longitude"],
-                spinergie_pos["latitude"],
-                spinergie_pos["longitude"],
-            )
-            if distancia > DISCREPANCY_THRESHOLD_KM:
-                logger.warning(
-                    f"Discrepância Trident x Spinergie para {identificador}: "
-                    f"{distancia:.2f} km (threshold: {DISCREPANCY_THRESHOLD_KM} km)"
-                )
-
-        if fixed:
-            distancia_fixa = _haversine_distance_km(
-                trident_pos["latitude"],
-                trident_pos["longitude"],
-                fixed["latitude"],
-                fixed["longitude"],
-            )
-            if distancia_fixa > DISCREPANCY_THRESHOLD_KM:
-                logger.warning(
-                    f"Discrepância Trident x coordenada fixa para {identificador}: "
-                    f"{distancia_fixa:.2f} km (threshold: {DISCREPANCY_THRESHOLD_KM} km)"
-                )
-
-        return trident_pos
-
-    # 2) Fallback Spinergie
-    spinergie_pos = None
-    try:
-        spinergie_pos = await fetch_spinergie_position_async(identificador)
-        if spinergie_pos and not _is_valid_coordinate(
-            spinergie_pos["latitude"], spinergie_pos["longitude"]
-        ):
-            logger.warning(
-                f"Spinergie retornou coordenadas inválidas para {identificador}; descartando"
-            )
-            spinergie_pos = None
-        elif spinergie_pos:
-            logger.info(f"Spinergie retornou posição válida para {identificador} (fallback)")
-    except Exception as exc:
-        logger.exception(f"Erro ao consultar Spinergie para {identificador}: {exc}")
-
-    if spinergie_pos:
-        if fixed:
-            distancia_fixa = _haversine_distance_km(
-                spinergie_pos["latitude"],
-                spinergie_pos["longitude"],
-                fixed["latitude"],
-                fixed["longitude"],
-            )
-            if distancia_fixa > DISCREPANCY_THRESHOLD_KM:
-                logger.warning(
-                    f"Discrepância Spinergie x coordenada fixa para {identificador}: "
-                    f"{distancia_fixa:.2f} km (threshold: {DISCREPANCY_THRESHOLD_KM} km)"
-                )
-        return spinergie_pos
-
-    # 3) Fallback para coordenadas fixas cadastradas
-    if fixed:
-        logger.info(f"Usando coordenadas fixas de fallback para {identificador}")
-        return fixed
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
-app = FastAPI(
-    title="IBAMA API - Monitoramento de Embarcações e Plataformas",
-    description=(
-        "API para rastreamento em tempo real de embarcações móveis e "
-        "plataformas fixas integrada às APIs Trident e Spinergie."
-    ),
-    version="1.1.0",
-    docs_url="/v1/docs",
-    openapi_url="/v1/openapi.json",
-    redoc_url="/v1/redoc",
-    swagger_ui_init_oauth={},  # Ativa autenticação no Swagger
-)
-
-# Configuração CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-@app.get("/")
-def root():
-    """Endpoint raiz."""
-    return {"message": "IBAMA API"}
 
 
 @app.get("/health")
 def health():
-    """Endpoint de verificação de saúde (público)."""
+    """Endpoint público de verificação de saúde."""
     return {"status": "ok"}
 
 
-@app.post("/auth/token", response_model=TokenResponse)
+@app.post("/auth/token", response_model=TokenResponse, responses={400: {"model": ErrorResponse}})
 async def login_for_access_token(
     grant_type: str = Form(...),
     client_id: str = Form(...),
@@ -769,116 +395,91 @@ async def login_for_access_token(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@app.get(
-    "/v1/unidades",
-    response_model=List[UnidadeMaritima],
-    responses={
-        503: {
-            "model": ErrorResponse,
-            "description": "Serviço de listagem de unidades indisponível",
-        },
-    },
-    summary="Listagem completa de unidades marítimas",
-    description=(
-        "Retorna a lista completa de embarcações móveis e plataformas fixas "
-        "monitoradas. Plataformas são normalizadas para os nomes oficiais."
-    ),
-)
-async def listar_unidades(
-    q: Optional[str] = None,
-    current_client: str = Depends(get_current_client_id),
-) -> List[UnidadeMaritima]:
-    logger.info("Requisição recebida: GET /v1/unidades")
-    try:
-        unidades = get_all_vessels()
-        if q:
-            q_upper = q.upper()
-            unidades = [
-                u
-                for u in unidades
-                if q_upper in u.mmsi.upper() or q_upper in u.nome.upper()
-            ]
-        unidades_normalizadas = [_normalizar_unidade(u) for u in unidades]
-        logger.info(f"Listagem concluída: {len(unidades_normalizadas)} unidade(s) retornada(s)")
-        return unidades_normalizadas
-    except Exception as exc:
-        logger.exception(f"Erro ao listar unidades: {exc}")
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Serviço de listagem de unidades está indisponível no momento. "
-                "Tente novamente mais tarde."
-            ),
-        )
+@app.get("/v1/conformidade", response_model=list[Conformidade], response_model_exclude_none=True)
+async def listar_conformidade(current_client: str = Depends(get_current_client_id)):
+    """Retorna a tabela completa de conformidade IBAMA."""
+    logger.info("Requisição: GET /v1/conformidade")
+    return get_conformidade_table()
 
 
-@app.get(
-    "/v1/posicao/{identificador}",
-    response_model=VesselPositionResponse,
-    responses={
-        400: {"model": ErrorResponse, "description": "Identificador inválido"},
-        404: {"model": ErrorResponse, "description": "Embarcação ou plataforma não encontrada"},
-        503: {"model": ErrorResponse, "description": "Serviço de posição indisponível"},
-    },
-    summary="Consulta posição em tempo real",
-    description=(
-        "Retorna a posição em tempo real de uma embarcação móvel ou de uma "
-        "plataforma fixa (PPM-1, PCE-1, P-08, P-65) a partir do seu MMSI ou "
-        "identificador. A fonte primária é a Trident; em caso de falha, usa "
-        "Spinergie e, por último, as coordenadas fixas cadastradas."
-    ),
-)
+@app.get("/v1/plataformas", response_model=list[Conformidade], response_model_exclude_none=True)
+async def listar_plataformas(current_client: str = Depends(get_current_client_id)):
+    """Retorna apenas as plataformas da tabela IBAMA."""
+    logger.info("Requisição: GET /v1/plataformas")
+    return get_plataformas()
+
+
+@app.get("/v1/embarcacoes", response_model=list[Conformidade], response_model_exclude_none=True)
+async def listar_embarcacoes(current_client: str = Depends(get_current_client_id)):
+    """Retorna apenas as embarcações da tabela IBAMA."""
+    logger.info("Requisição: GET /v1/embarcacoes")
+    return get_embarcacoes()
+
+
+@app.get("/v1/posicao/{identificador}", response_model=PosicaoResponse, responses={
+    400: {"model": ErrorResponse},
+    404: {"model": ErrorResponse},
+    503: {"model": ErrorResponse},
+})
 async def consultar_posicao(
-    identificador: str = Path(
-        ...,
-        title="MMSI, nome ou identificador da plataforma",
-        description=(
-            "MMSI da embarcação (9 dígitos), nome da embarcação ou identificador de "
-            "plataforma fixa (PPM-1, PCE-1, P-08, P-65)"
-        ),
-        min_length=1,
-    ),
+    identificador: str = Path(..., min_length=1, description="Nome da plataforma, MMSI ou nome da embarcação"),
     current_client: str = Depends(get_current_client_id),
-) -> VesselPositionResponse:
-    logger.info(f"Requisição recebida: GET /v1/posicao/{identificador}")
-
-    # Resolve o identificador para o MMSI real
-    mmsi = _resolve_identificador(identificador)
-
-    posicao = await _resolver_posicao(mmsi)
-    if posicao:
-        logger.info(
-            f"Retornando posição para {mmsi}: fonte={posicao['fonte']} "
-            f"({posicao['latitude']}, {posicao['longitude']})"
-        )
-        return VesselPositionResponse(**posicao)
-
-    # Fallback local para testes/compatibilidade
-    logger.info(f"APIs sem dados válidos para {mmsi}; tentando fallback local")
-    posicao_mock = get_vessel_position(mmsi)
-    if posicao_mock:
-        logger.info(f"Posição local encontrada para {mmsi}")
-        return _converter_posicao_mock(posicao_mock, mmsi)
-
-    logger.warning(f"Embarcação ou plataforma {mmsi} não encontrada ou sem posição disponível")
-    raise HTTPException(
-        status_code=404,
-        detail=f"Embarcação ou plataforma '{mmsi}' não encontrada ou sem posição disponível.",
-    )
+):
+    """Consulta a posição em tempo real de uma unidade.
+    
+    Para plataformas, retorna as coordenadas fixas cadastradas.
+    Para embarcações, consulta a API Spinergie (c/ fallback para cache).
+    """
+    logger.info(f"Requisição: GET /v1/posicao/{identificador}")
+    try:
+        posicao = await get_position(identificador)
+        if posicao:
+            return PosicaoResponse(**posicao)
+        else:
+            raise HTTPException(status_code=404, detail=f"Unidade '{identificador}' não encontrada ou sem posição disponível.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao consultar posição para {identificador}: {e}")
+        raise HTTPException(status_code=503, detail="Erro interno ao obter posição. Tente novamente mais tarde.")
 
 
 @app.exception_handler(Exception)
-async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error(f"Erro inesperado na requisição {request.url}: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": "Erro interno no servidor. Por favor, tente novamente mais tarde."
-        },
-    )
+async def generic_exception_handler(request, exc):
+    logger.error(f"Erro inesperado: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Erro interno do servidor"})
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+
+### .env.example ###
+# Configurações do servidor
+PORT=8000
+LOG_LEVEL=INFO
+
+# Credenciais da API Spinergie (obrigatório para dados de embarcações)
+SPINERGIE_API_KEY=your_spinergie_api_key_here
+
+# Segurança JWT e cliente
+JWT_SECRET_KEY=replace_with_a_secure_random_secret
+CLIENT_ID=ibama_client
+CLIENT_SECRET=strong_secret_here
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# MMSIs das embarcações (opcional, pode ser sobrescrito se necessário)
+# MAERSK_VEGA_MMSI=710001720
+# MAERSK_VENTURA_MMSI=710002450
+# MMSIs das plataformas (apenas se houver consulta externa)
+# P08_MMSI=538001903
+# P65_MMSI=538003593
+
+### requirements.txt ###
+fastapi>=0.95.0
+uvicorn>=0.17.0
+python-jose[cryptography]>=3.3.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+httpx>=0.23.0
+python-dotenv>=1.0.0

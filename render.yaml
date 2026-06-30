@@ -5,11 +5,20 @@ services:
     plan: free
     pythonVersion: 3.12
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"
+    healthCheckPath: /health
     envVars:
       - key: CLIENT_ID
-        value: ibama_client
+        value: ibama_client_id
       - key: CLIENT_SECRET
         generateValue: true
       - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: LOG_LEVEL
+        value: INFO
+      - key: ENVIRONMENT
+        value: production
+      - key: SPINERGIE_BASE_URL
+        value: https://trident-energy-br.spinergie.com
+      - key: SPINERGIE_API_KEY
         generateValue: true
