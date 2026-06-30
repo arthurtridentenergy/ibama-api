@@ -1,437 +1,520 @@
 import asyncio
-import os
-import math
 import logging
-from datetime import datetime, timezone, timedelta
-from enum import Enum
-from typing import Optional, List, Dict, Any
+import math
+import os
+import secrets
+import time
 from contextlib import asynccontextmanager
-from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, status, Request, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 from pydantic import BaseModel, Field
-import httpx
 
-from auth import authenticate_client, create_access_token
+# ---------------------------------------------------------------------------
+# Configuração de logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("ibama_api")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Configuração
+# ---------------------------------------------------------------------------
+class Settings:
+    CLIENT_ID: str = os.getenv("CLIENT_ID", "ibama-client")
+    CLIENT_SECRET: str = os.getenv("CLIENT_SECRET", "ibama-secret")
+    JWT_SECRET: str = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+    RATE_LIMIT: int = int(os.getenv("RATE_LIMIT", "100"))
+    RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 
-VERSION = "1.0.0"
-APP_NAME = "IBAMA Maritime Units API"
+settings = Settings()
 
-class TipoUnidade(str, Enum):
-    UNIDADE_PRODUCAO = "UNIDADE_PRODUCAO"
-    UNIDADE_PERFURACAO = "UNIDADE_PERFURACAO"
-    EMBARCACAO_APOIO = "EMBARCACAO_APOIO"
-    EMBARCACAO_TRANSPORTE = "EMBARCACAO_TRANSPORTE"
-
+# ---------------------------------------------------------------------------
+# Modelos Pydantic
+# ---------------------------------------------------------------------------
 class UnidadeMaritima(BaseModel):
-    id: str
-    nome: str
-    tipo: TipoUnidade
-    mmsi: Optional[str] = None
-    licenca: str
-    latitude_base: float
-    longitude_base: float
+    id: str = Field(..., examples=["P-65"], description="Identificador único da unidade")
+    nome: str = Field(..., examples=["P-65"], description="Nome da unidade marítima")
+    tipo: str = Field(..., examples=["PLATAFORMA DE PETRÓLEO"], description="Tipo de unidade")
+    latitude: float = Field(..., ge=-90.0, le=90.0, examples=[-22.7018])
+    longitude: float = Field(..., ge=-180.0, le=180.0, examples=[-40.6772])
+    licenca: str = Field(
+        default="LO1572/2020",
+        examples=["LO1572/2020"],
+        description="Licença ambiental emitida pelo IBAMA"
+    )
+    ativa: bool = Field(default=True, examples=[True])
+
 
 class PosicaoAIS(BaseModel):
-    mmsi: str
-    latitude: float
-    longitude: float
-    velocidade_nos: float
-    curso_graus: float
-    destino: Optional[str] = None
-    timestamp: str
-    status: str
+    mmsi: int = Field(..., examples=[710002450], description="Número MMSI da embarcação")
+    nome: str = Field(..., examples=["Maersk Ventura"], description="Nome da embarcação")
+    latitude: float = Field(..., ge=-90.0, le=90.0)
+    longitude: float = Field(..., ge=-180.0, le=180.0)
+    velocidade: float = Field(
+        ...,
+        ge=0.0,
+        le=50.0,
+        examples=[12.5],
+        description="Velocidade sobre o solo em nós"
+    )
+    curso: float = Field(
+        ...,
+        ge=0.0,
+        lt=360.0,
+        examples=[45.0],
+        description="Curso sobre o solo em graus"
+    )
+    timestamp: str = Field(
+        ...,
+        examples=["2024-01-15T10:30:00Z"],
+        description="Timestamp ISO 8601 UTC"
+    )
+    status: str = Field(
+        ...,
+        examples=["UNDER WAY USING ENGINE"],
+        description="Status de navegação"
+    )
+
 
 class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    expires_in: int
+    access_token: str = Field(..., description="Token JWT de acesso")
+    token_type: str = Field(default="Bearer", examples=["Bearer"])
+    expires_in: int = Field(
+        default=3600,
+        examples=[3600],
+        description="Tempo de expiração do token em segundos"
+    )
 
-class ErrorResponse(BaseModel):
-    success: bool = False
-    message: str
-    data: None = None
-    timestamp: str
 
-class ApiResponse(BaseModel):
-    success: bool
-    message: str
-    data: Any
-    timestamp: str
-    version: str = VERSION
+class ErroResponse(BaseModel):
+    error: str = Field(..., examples=["HTTPException"])
+    message: str = Field(..., examples=["Recurso não encontrado"])
+    request_id: Optional[str] = Field(default=None, examples=["uuid-1234"])
+    timestamp: str = Field(..., examples=["2024-01-15T10:30:00Z"])
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-# Unidades fixas (plataformas)
-PLATFORMS_DATA = [
-    {
-        "id": "P-65",
-        "nome": "P-65",
-        "tipo": TipoUnidade.UNIDADE_PRODUCAO,
-        "mmsi": "538003593",
-        "latitude_base": -22.7018,
-        "longitude_base": -40.6772,
-        "licenca": "LO1572/2020",
-    },
-    {
-        "id": "P-08",
-        "nome": "P-08",
-        "tipo": TipoUnidade.UNIDADE_PRODUCAO,
-        "mmsi": "538001903",
-        "latitude_base": -22.6732,
-        "longitude_base": -40.5465,
-        "licenca": "LO1572/2020",
-    },
-    {
-        "id": "PPM-1",
-        "nome": "PPM-1",
-        "tipo": TipoUnidade.UNIDADE_PERFURACAO,
-        "mmsi": "PPM-1",
-        "latitude_base": -22.7980,
-        "longitude_base": -40.7625,
-        "licenca": "LO1572/2020",
-    },
-    {
-        "id": "PCE-1",
-        "nome": "PCE-1",
-        "tipo": TipoUnidade.UNIDADE_PERFURACAO,
-        "mmsi": "PCE-1",
-        "latitude_base": -22.7083,
-        "longitude_base": -40.6932,
-        "licenca": "LO1572/2020",
-    },
+# ---------------------------------------------------------------------------
+# Dados em memória
+# ---------------------------------------------------------------------------
+PLATAFORMAS: List[UnidadeMaritima] = [
+    UnidadeMaritima(
+        id="P-65",
+        nome="P-65",
+        tipo="PLATAFORMA DE PETRÓLEO",
+        latitude=-22.7018,
+        longitude=-40.6772,
+    ),
+    UnidadeMaritima(
+        id="P-08",
+        nome="P-08",
+        tipo="PLATAFORMA DE PETRÓLEO",
+        latitude=-22.6732,
+        longitude=-40.5465,
+    ),
+    UnidadeMaritima(
+        id="PPM-1",
+        nome="PPM-1",
+        tipo="PLATAFORMA DE PETRÓLEO",
+        latitude=-22.798,
+        longitude=-40.7625,
+    ),
+    UnidadeMaritima(
+        id="PCE-1",
+        nome="PCE-1",
+        tipo="PLATAFORMA DE PETRÓLEO",
+        latitude=-22.7083,
+        longitude=-40.6932,
+    ),
 ]
 
-# Embarcações móveis (configuração para simulação)
-VESSEL_CONFIG = [
+EMBARCACOES: List[Dict[str, Any]] = [
     {
-        "id": "maersk-ventura",
+        "mmsi": 710002450,
         "nome": "Maersk Ventura",
-        "mmsi": "710002450",
-        "tipo": TipoUnidade.EMBARCACAO_TRANSPORTE,
-        "base_lat": -22.7018,
-        "base_lon": -40.6772,
-        "phase": 0.0,
-        "radius": 0.025,
-        "licenca": "LO1572/2020",
+        "plataforma": "P-65",
+        "raio": 0.008,
+        "velocidade_angular": 0.0005,
+        "fase": 0.0,
     },
     {
-        "id": "maersk-vega",
+        "mmsi": 710001720,
         "nome": "Maersk Vega",
-        "mmsi": "710001720",
-        "tipo": TipoUnidade.EMBARCACAO_TRANSPORTE,
-        "base_lat": -22.6732,
-        "base_lon": -40.5465,
-        "phase": 2.0,
-        "radius": 0.030,
-        "licenca": "LO1572/2020",
+        "plataforma": "P-08",
+        "raio": 0.007,
+        "velocidade_angular": 0.0007,
+        "fase": math.pi,
     },
 ]
 
-class VesselDataProvider:
-    """Gerencia dados de posição com cache e simulador."""
 
-    def __init__(self, cache_ttl_seconds: int = 60):
-        self.cache_ttl = cache_ttl_seconds
-        self._cache: Dict[str, PosicaoAIS] = {}
-        self._last_fetch: Optional[datetime] = None
+# ---------------------------------------------------------------------------
+# Funções auxiliares
+# ---------------------------------------------------------------------------
+def iso_timestamp() -> str:
+    """Retorna timestamp ISO 8601 com sufixo Z."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def create_access_token(
+    data: Dict[str, Any], expires_delta: Optional[timedelta] = None
+) -> str:
+    """Gera um JWT de acesso OAuth 2.0 Client Credentials."""
+    to_encode = data.copy()
+    now = datetime.now(timezone.utc)
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = now + expires_delta
+    to_encode.update({"exp": expire, "iat": now, "type": "access_token"})
+    encoded_jwt = jwt.encode(
+        to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM
+    )
+    return encoded_jwt
+
+
+def calcular_posicao(embarcacao: Dict[str, Any], timestamp: datetime) -> PosicaoAIS:
+    """Simula movimento circular da embarcação ao redor da plataforma."""
+    plataforma = next(
+        (p for p in PLATAFORMAS if p.id == embarcacao["plataforma"]), None
+    )
+    if plataforma is None:
+        raise ValueError(f"Plataforma {embarcacao['plataforma']} não encontrada")
+
+    lat_center = plataforma.latitude
+    lon_center = plataforma.longitude
+
+    t = timestamp.timestamp()
+    theta = embarcacao["fase"] + embarcacao["velocidade_angular"] * t
+    raio = embarcacao["raio"]
+
+    dlat = raio * math.cos(theta)
+    dlon = raio * math.sin(theta) / math.cos(math.radians(lat_center))
+
+    lat = lat_center + dlat
+    lon = lon_center + dlon
+
+    curso = (math.degrees(theta) + 90.0) % 360.0
+    velocidade = 10.0 + 2.0 * math.sin(theta * 2.0)
+
+    return PosicaoAIS(
+        mmsi=embarcacao["mmsi"],
+        nome=embarcacao["nome"],
+        latitude=round(lat, 6),
+        longitude=round(lon, 6),
+        velocidade=round(abs(velocidade), 2),
+        curso=round(curso, 2),
+        timestamp=timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        status="UNDER WAY USING ENGINE",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rate Limiting (in-memory)
+# ---------------------------------------------------------------------------
+class RateLimiter:
+    def __init__(self, limit: int, window: int):
+        self.limit = limit
+        self.window = window
+        self._requests: Dict[str, List[float]] = {}
         self._lock = asyncio.Lock()
 
-    async def initialize(self):
-        # Preenche o cache na inicialização
-        await self._refresh()
-
-    async def get_all_positions(self) -> List[PosicaoAIS]:
+    async def check(self, key: str) -> Tuple[bool, int]:
         async with self._lock:
-            if self._is_cache_stale():
-                await self._refresh()
-            return list(self._cache.values())
+            now = time.time()
+            timestamps = [
+                ts
+                for ts in self._requests.get(key, [])
+                if now - ts < self.window
+            ]
+            if len(timestamps) >= self.limit:
+                self._requests[key] = timestamps
+                return False, 0
 
-    async def get_position_by_mmsi(self, mmsi: str) -> Optional[PosicaoAIS]:
-        async with self._lock:
-            if self._is_cache_stale():
-                await self._refresh()
-            return self._cache.get(mmsi)
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            return True, self.limit - len(timestamps)
 
-    def _is_cache_stale(self) -> bool:
-        if not self._cache or self._last_fetch is None:
-            return True
-        return datetime.now(timezone.utc) - self._last_fetch > timedelta(seconds=self.cache_ttl)
 
-    async def _refresh(self):
-        try:
-            fetched = await self._fetch_real_time()
-            if fetched:
-                # Mescla com dados fixos das plataformas (sempre disponíveis)
-                merged = {}
-                for plat in PLATFORMS_DATA:
-                    if plat["mmsi"]:
-                        merged[plat["mmsi"]] = PosicaoAIS(
-                            mmsi=str(plat["mmsi"]),
-                            latitude=plat["latitude_base"],
-                            longitude=plat["longitude_base"],
-                            velocidade_nos=0.0,
-                            curso_graus=0.0,
-                            timestamp=_now_iso(),
-                            status="FIXA",
-                        )
-                for pos in fetched:
-                    merged[pos.mmsi] = pos
-                self._cache = merged
-            else:
-                self._cache = self._simulate_positions()
-        except Exception as exc:
-            logger.warning("Falha na atualização dos dados, usando simulação: %s", exc)
-            self._cache = self._simulate_positions()
-        self._last_fetch = datetime.now(timezone.utc)
+rate_limiter = RateLimiter(
+    limit=settings.RATE_LIMIT, window=settings.RATE_LIMIT_WINDOW_SECONDS
+)
 
-    async def _fetch_real_time(self) -> List[PosicaoAIS]:
-        api_url = os.getenv("AIS_API_URL")
-        api_key = os.getenv("AIS_API_KEY")
-        if not api_url:
-            return []
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        mmsi_list = [v["mmsi"] for v in VESSEL_CONFIG]
-        positions = []
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for mmsi in mmsi_list:
-                url = api_url.format(mmsi=mmsi)
-                try:
-                    resp = await client.get(url, headers=headers)
-                    resp.raise_for_status()
-                    payload = resp.json()
-                    positions.append(PosicaoAIS(
-                        mmsi=str(mmsi),
-                        latitude=float(payload["latitude"]),
-                        longitude=float(payload["longitude"]),
-                        velocidade_nos=float(payload.get("speed", 0.0)),
-                        curso_graus=float(payload.get("course", 0.0)),
-                        destino=payload.get("destination"),
-                        timestamp=_now_iso(),
-                        status=payload.get("status", "UNDER_WAY"),
-                    ))
-                except Exception as exc:
-                    logger.warning("Erro ao buscar MMSI %s: %s", mmsi, exc)
-        return positions
 
-    def _simulate_positions(self) -> Dict[str, PosicaoAIS]:
-        data: Dict[str, PosicaoAIS] = {}
-        now = datetime.now(timezone.utc)
-        t = now.timestamp() / 60.0
+# ---------------------------------------------------------------------------
+# Dependências de segurança
+# ---------------------------------------------------------------------------
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 
-        # Plataformas fixas
-        for plat in PLATFORMS_DATA:
-            if plat["mmsi"]:
-                key = str(plat["mmsi"])
-            else:
-                key = plat["id"]
-            data[key] = PosicaoAIS(
-                mmsi=key,
-                latitude=plat["latitude_base"],
-                longitude=plat["longitude_base"],
-                velocidade_nos=0.0,
-                curso_graus=0.0,
-                timestamp=_now_iso(),
-                status="FIXA",
-            )
 
-        # Embarcações simuladas
-        for cfg in VESSEL_CONFIG:
-            phase = cfg["phase"]
-            radius = cfg["radius"]
-            base_lat = cfg["base_lat"]
-            base_lon = cfg["base_lon"]
-            mmsi = str(cfg["mmsi"])
+async def get_request_id(
+    request: Request,
+    x_request_id: str = Header(
+        ..., description="Identificador único da requisição (UUID recomendado)"
+    ),
+) -> str:
+    """Valida e armazena o X-Request-ID obrigatório."""
+    if not x_request_id or not x_request_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cabeçalho X-Request-ID é obrigatório",
+        )
+    request.state.request_id = x_request_id
+    return x_request_id
 
-            lat = base_lat + radius * math.cos((t + phase) / 10.0)
-            lon = base_lon + radius * math.sin((t + phase) / 10.0)
-            speed = 4.0 + 3.0 * math.sin((t + phase) / 5.0)
-            course = ((t * 5.0 + phase * 30.0) % 360.0)
-            status = "EM_MOVIMENTO" if speed > 1.0 else "PARADO"
 
-            data[mmsi] = PosicaoAIS(
-                mmsi=mmsi,
-                latitude=round(lat, 6),
-                longitude=round(lon, 6),
-                velocidade_nos=round(abs(speed), 2),
-                curso_graus=round(course, 2),
-                destino="Terminal BC-33",
-                timestamp=_now_iso(),
-                status=status,
-            )
-        return data
+async def get_current_client(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    x_request_id: str = Header(
+        ..., description="Identificador único da requisição (UUID recomendado)"
+    ),
+) -> str:
+    """Valida o token Bearer e retorna o identificador do cliente."""
+    request.state.request_id = x_request_id
 
-# Instância global do provider
-provider = VesselDataProvider(cache_ttl_seconds=60)
-startup_time = datetime.now(timezone.utc)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token de acesso não fornecido",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-# Rate Limiter simples por IP
-class RateLimiter:
-    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window = window_seconds
-        self.requests: Dict[str, List[datetime]] = defaultdict(list)
-
-    async def __call__(self, request: Request):
-        client_ip = request.client.host
-        now = datetime.now(timezone.utc)
-        # Remove entradas antigas
-        self.requests[client_ip] = [
-            t for t in self.requests[client_ip]
-            if now - t < timedelta(seconds=self.window)
-        ]
-        if len(self.requests[client_ip]) >= self.max_requests:
+    try:
+        payload = jwt.decode(
+            token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
+        )
+        client_id = payload.get("sub")
+        if not client_id:
             raise HTTPException(
-                status_code=429,
-                detail="Muitas requisições. Aguarde e tente novamente.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token inválido: sem identificação do cliente",
             )
-        self.requests[client_ip].append(now)
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido ou expirado",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-rate_limiter = RateLimiter()
+    return client_id
 
+
+async def rate_limit_guard(
+    request: Request, client_id: str = Depends(get_current_client)
+) -> str:
+    """Aplica rate limiting de 100 requisições/minuto por cliente."""
+    allowed, remaining = await rate_limiter.check(client_id)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Limite de requisições excedido. "
+                f"Limite: {settings.RATE_LIMIT} requisições por "
+                f"{settings.RATE_LIMIT_WINDOW_SECONDS} segundos."
+            ),
+        )
+    request.state.rate_limit_remaining = remaining
+    return client_id
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await provider.initialize()
-    logger.info("Aplicação %s iniciada (v%s)", APP_NAME, VERSION)
+    logger.info("Inicializando API IBAMA...")
     yield
-    logger.info("Aplicação %s finalizada", APP_NAME)
+    logger.info("Finalizando API IBAMA...")
 
+
+# ---------------------------------------------------------------------------
+# Inicialização do FastAPI
+# ---------------------------------------------------------------------------
 app = FastAPI(
-    title=APP_NAME,
-    description="API IBAMA para consulta de unidades marítimas e posições AIS.",
-    version=VERSION,
+    title="API IBAMA - Monitoramento de Unidades Marítimas",
+    description=(
+        "API REST para consulta de unidades marítimas licenciadas pelo IBAMA "
+        "e acompanhamento de posições AIS de embarcações em tempo real."
+    ),
+    version="1.0.0",
     docs_url="/v1/docs",
     redoc_url="/v1/redoc",
+    openapi_url="/v1/openapi.json",
+    contact={
+        "name": "IBAMA - Instituto Brasileiro do Meio Ambiente",
+        "url": "https://www.ibama.gov.br",
+    },
+    license_info={
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT",
+    },
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
+# ---------------------------------------------------------------------------
+# Middlewares
+# ---------------------------------------------------------------------------
+@app.middleware("http")
+async def add_response_headers(request: Request, call_next):
+    response = await call_next(request)
+
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+
+    remaining = getattr(request.state, "rate_limit_remaining", None)
+    if remaining is not None:
+        response.headers["X-RateLimit-Limit"] = str(settings.RATE_LIMIT)
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Window"] = str(
+            settings.RATE_LIMIT_WINDOW_SECONDS
+        )
+
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Tratamento de erros padronizado
+# ---------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    content = ErroResponse(
+        error="HTTPException",
+        message=exc.detail,
+        request_id=getattr(request.state, "request_id", None),
+        timestamp=iso_timestamp(),
+    ).model_dump()
+    headers = dict(exc.headers) if exc.headers else {}
+    return JSONResponse(status_code=exc.status_code, content=content, headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+):
+    content = ErroResponse(
+        error="ValidationError",
+        message="Erro de validação nos dados de entrada. Verifique os parâmetros e o corpo da requisição.",
+        request_id=getattr(request.state, "request_id", None),
+        timestamp=iso_timestamp(),
+    ).model_dump()
     return JSONResponse(
-        status_code=exc.status_code,
-        content=ErrorResponse(
-            success=False,
-            message=exc.detail,
-            timestamp=_now_iso(),
-        ).model_dump(),
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content
     )
+
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    logger.exception("Erro inesperado: %s", exc)
+    logger.exception("Erro interno não tratado")
+    content = ErroResponse(
+        error="InternalServerError",
+        message="Erro interno do servidor. Entre em contato com o suporte.",
+        request_id=getattr(request.state, "request_id", None),
+        timestamp=iso_timestamp(),
+    ).model_dump()
     return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=ErrorResponse(
-            success=False,
-            message="Erro interno do servidor.",
-            timestamp=_now_iso(),
-        ).model_dump(),
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=content
     )
 
-@app.post("/v1/auth/token", response_model=TokenResponse, tags=["Autenticação"], dependencies=[Depends(rate_limiter)])
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    """Autenticação OAuth 2.0 Client Credentials."""
-    client_id = form_data.username
-    client_secret = form_data.password
-    if not authenticate_client(client_id, client_secret):
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+@app.post(
+    "/auth/token",
+    response_model=TokenResponse,
+    tags=["Autenticação"],
+    summary="Obter token de acesso OAuth 2.0 Client Credentials",
+    response_description="Token JWT para autenticação nos endpoints protegidos",
+)
+async def auth_token(
+    request: Request,
+    grant_type: str = Form(..., description="Deve ser 'client_credentials'"),
+    client_id: str = Form(..., description="Client ID fornecido"),
+    client_secret: str = Form(..., description="Client Secret fornecido"),
+    request_id: str = Depends(get_request_id),
+):
+    if grant_type != "client_credentials":
         raise HTTPException(
-            status_code=401,
-            detail="Credenciais inválidas.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="grant_type deve ser 'client_credentials'",
         )
-    # Em produção geraria um JWT; aqui retornamos um token fixo para demonstração
+
+    if client_id != settings.CLIENT_ID or client_secret != settings.CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciais do cliente inválidas",
+        )
+
     access_token = create_access_token(data={"sub": client_id})
     return TokenResponse(
         access_token=access_token,
-        token_type="bearer",
-        expires_in=3600,
+        token_type="Bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
 
-@app.get("/v1/unidades", response_model=ApiResponse, tags=["Unidades"], dependencies=[Depends(rate_limiter)])
-async def list_unidades():
-    """Lista todas as unidades marítimas cadastradas."""
-    unidades = []
-    # Plataformas
-    for p in PLATFORMS_DATA:
-        unidades.append(UnidadeMaritima(
-            id=p["id"],
-            nome=p["nome"],
-            tipo=p["tipo"],
-            mmsi=p["mmsi"],
-            licenca=p["licenca"],
-            latitude_base=p["latitude_base"],
-            longitude_base=p["longitude_base"],
-        ))
-    # Embarcações
-    for v in VESSEL_CONFIG:
-        unidades.append(UnidadeMaritima(
-            id=v["id"],
-            nome=v["nome"],
-            tipo=v["tipo"],
-            mmsi=v["mmsi"],
-            licenca=v["licenca"],
-            latitude_base=v["base_lat"],
-            longitude_base=v["base_lon"],
-        ))
-    return ApiResponse(
-        success=True,
-        message=f"{len(unidades)} unidades encontradas.",
-        data=[u.model_dump() for u in unidades],
-        timestamp=_now_iso(),
+
+@app.get(
+    "/v1/unidades",
+    response_model=List[UnidadeMaritima],
+    tags=["IBAMA"],
+    dependencies=[Depends(rate_limit_guard)],
+    summary="Listar unidades marítimas licenciadas",
+    response_description="Lista de plataformas e unidades marítimas com licença LO1572/2020",
+)
+async def listar_unidades(request: Request):
+    return PLATAFORMAS
+
+
+@app.get(
+    "/v1/posicao/{mmsi}",
+    response_model=PosicaoAIS,
+    tags=["IBAMA"],
+    dependencies=[Depends(rate_limit_guard)],
+    summary="Consultar posição AIS de embarcação",
+    response_description="Posição atual simulada da embarcação identificada pelo MMSI",
+)
+async def obter_posicao(request: Request, mmsi: int):
+    for embarcacao in EMBARCACOES:
+        if embarcacao["mmsi"] == mmsi:
+            return calcular_posicao(embarcacao, datetime.now(timezone.utc))
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Embarcação com MMSI {mmsi} não encontrada",
     )
 
-@app.get("/v1/posicao/{mmsi}", response_model=ApiResponse, tags=["Posições"], dependencies=[Depends(rate_limiter)])
-async def get_posicao_by_mmsi(mmsi: str):
-    """Obtém a última posição AIS de uma unidade pelo MMSI."""
-    # Permite buscar por id de plataforma (caso não tenha MMSI) ou MMSI real
-    pos = await provider.get_position_by_mmsi(mmsi)
-    if not pos:
-        raise HTTPException(status_code=404, detail=f"Unidade com MMSI/ID {mmsi} não encontrada.")
-    return ApiResponse(
-        success=True,
-        message="Posição obtida com sucesso.",
-        data=pos.model_dump(),
-        timestamp=_now_iso(),
-    )
 
-@app.get("/health", response_model=ApiResponse, tags=["Saúde"])
-async def health_check():
-    """Verifica a saúde da aplicação."""
-    uptime = int((datetime.now(timezone.utc) - startup_time).total_seconds())
-    return ApiResponse(
-        success=True,
-        message="Serviço operacional.",
-        data={
-            "status": "ok",
-            "timestamp": _now_iso(),
-            "version": VERSION,
-            "uptime_seconds": uptime,
-        },
-        timestamp=_now_iso(),
-    )
+@app.get(
+    "/health",
+    tags=["Monitoramento"],
+    summary="Health check da API",
+    response_description="Status operacional e timestamp atual",
+)
+async def health_check(request: Request):
+    return {
+        "status": "ok",
+        "timestamp": iso_timestamp(),
+        "version": "1.0.0",
+        "service": "api-ibama",
+    }
 
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=os.getenv("ENVIRONMENT", "production").lower() == "development",
-    )
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
