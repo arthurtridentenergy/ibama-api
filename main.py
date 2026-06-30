@@ -2,15 +2,18 @@ import asyncio
 import logging
 import math
 import os
+import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-from aiohttp import ClientTimeout
-from fastapi import FastAPI, HTTPException, Path, Request
+import jwt
+import requests
+from fastapi import FastAPI, HTTPException, Path, Depends, Request, Form
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -28,7 +31,6 @@ def _configure_logging() -> None:
 _configure_logging()
 logger = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
 # Configuração das APIs externas
 # ---------------------------------------------------------------------------
@@ -44,6 +46,13 @@ DISCREPANCY_THRESHOLD_KM = 3.0
 FLORIANOPOLIS_CENTER = (-27.595, -48.548)
 FLORIANOPOLIS_RADIUS_KM = 50.0
 
+# JWT and OAuth2 Client Credentials
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "secret")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+
+CLIENT_ID = os.getenv("CLIENT_ID", "client1")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "secret1")
 
 # ---------------------------------------------------------------------------
 # Coordenadas corretas das plataformas (conversão de graus/minutos para decimal)
@@ -158,6 +167,11 @@ class ErrorResponse(BaseModel):
     detail: str = Field(..., description="Mensagem descritiva do erro")
 
 
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
 # ---------------------------------------------------------------------------
 # Registro de unidades marítimas
 # ---------------------------------------------------------------------------
@@ -257,27 +271,28 @@ def _is_valid_coordinate(lat: Any, lon: Any) -> bool:
     return True
 
 
-def _validar_identificador(identificador: str) -> None:
-    """Valida se o identificador é um MMSI de 9 dígitos ou uma plataforma fixa conhecida."""
+def _resolve_identificador(identificador: str) -> str:
+    """
+    Resolve o identificador para um MMSI válido. Suporta MMSI numérico de 9 dígitos,
+    IDs de plataformas fixas (PPM-1, PCE-1, P-08, P-65) e nomes de embarcações.
+    """
     if not identificador:
-        logger.warning("Identificador não informado")
         raise HTTPException(status_code=400, detail="Identificador é obrigatório.")
 
+    # Verifica se é uma plataforma fixa conhecida
     if identificador in PLATAFORMAS_FIXAS:
-        return
+        return identificador
 
+    # Verifica se é um MMSI numérico de 9 dígitos
     if identificador.isdigit() and len(identificador) == 9:
-        return
+        return identificador
 
-    logger.warning(f"Identificador inválido: '{identificador}'")
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Identificador inválido: '{identificador}'. "
-            "Informe um MMSI de 9 dígitos ou um identificador de plataforma fixa "
-            "(PPM-1, PCE-1, P-08, P-65)."
-        ),
-    )
+    # Busca por nome
+    for unit in UNIDADES_REGISTRY:
+        if unit.get("nome", "").upper() == identificador.upper():
+            return unit["mmsi"]
+
+    raise HTTPException(status_code=400, detail=f"Identificador inválido ou não encontrado: '{identificador}'.")
 
 
 def _normalizar_nome(identificador: str, nome_original: Optional[str] = None) -> str:
@@ -289,9 +304,9 @@ def _normalizar_nome(identificador: str, nome_original: Optional[str] = None) ->
     if nome_original:
         return nome_original
 
-    for unidade in get_all_vessels():
-        if unidade.mmsi == identificador:
-            return unidade.nome
+    for unidade in UNIDADES_REGISTRY:
+        if unidade["mmsi"] == identificador:
+            return unidade["nome"]
 
     return identificador
 
@@ -396,9 +411,46 @@ def _normalize_api_response(
 
 
 # ---------------------------------------------------------------------------
-# Fontes de dados: Trident e Spinergie
+# Segurança: Autenticação JWT
 # ---------------------------------------------------------------------------
-async def _call_trident_api(identificador: str) -> Optional[Any]:
+security = HTTPBearer(auto_error=False)
+
+
+def authenticate_client(client_id: str, client_secret: str) -> bool:
+    """Verifica as credenciais do cliente."""
+    return client_id == CLIENT_ID and client_secret == CLIENT_SECRET
+
+
+def create_access_token(data: dict) -> str:
+    """Cria um token JWT."""
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def get_current_client_id(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> str:
+    """Valida o token JWT e retorna o client_id."""
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Token de autorização ausente")
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[ALGORITHM])
+        client_id: str = payload.get("sub")
+        if client_id is None:
+            raise HTTPException(status_code=401, detail="Token inválido")
+        return client_id
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Token inválido ou expirado")
+
+
+# ---------------------------------------------------------------------------
+# Fontes de dados: Trident e Spinergie (síncronas com requests)
+# ---------------------------------------------------------------------------
+def _call_trident_api(identificador: str) -> Optional[Any]:
     """Executa a chamada HTTP ao endpoint da Trident."""
     if not TRIDENT_API_KEY:
         logger.error("Variável de ambiente TRIDENT_API_KEY não configurada")
@@ -411,66 +463,46 @@ async def _call_trident_api(identificador: str) -> Optional[Any]:
         "Content-Type": "application/json",
     }
     params = {"mmsi": identificador}
-    timeout = ClientTimeout(total=15)
+    timeout = 15
 
     logger.info(f"Consultando Trident para {identificador} - URL: {url}")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers, params=params) as response:
-            logger.debug(f"Trident respondeu {response.status} para {identificador}")
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        logger.debug(f"Trident respondeu {response.status_code} para {identificador}")
 
-            if response.status == 200:
-                data = await response.json()
-                logger.debug(f"Resposta bruta da Trident para {identificador}: {data}")
-                if isinstance(data, list):
-                    return data[0] if data else None
-                if isinstance(data, dict):
-                    return data
-                return None
-
-            if response.status == 401:
-                logger.error("Falha de autenticação na API Trident (401). Verifique TRIDENT_API_KEY")
-            elif response.status == 403:
-                logger.error("Acesso negado à API Trident (403)")
-            elif response.status == 404:
-                logger.warning(f"Embarcação não encontrada na Trident (404) para {identificador}")
-            elif response.status >= 500:
-                logger.error(f"Erro no servidor Trident ({response.status}) para {identificador}")
-            else:
-                body = await response.text()
-                logger.error(
-                    f"Resposta inesperada da Trident ({response.status}) para {identificador}: {body}"
-                )
-
+        if response.status_code == 200:
+            data = response.json()
+            logger.debug(f"Resposta bruta da Trident para {identificador}: {data}")
+            if isinstance(data, list):
+                return data[0] if data else None
+            if isinstance(data, dict):
+                return data
             return None
 
+        if response.status_code == 401:
+            logger.error("Falha de autenticação na API Trident (401). Verifique TRIDENT_API_KEY")
+        elif response.status_code == 403:
+            logger.error("Acesso negado à API Trident (403)")
+        elif response.status_code == 404:
+            logger.warning(f"Embarcação não encontrada na Trident (404) para {identificador}")
+        elif response.status_code >= 500:
+            logger.error(f"Erro no servidor Trident ({response.status_code}) para {identificador}")
+        else:
+            logger.error(
+                f"Resposta inesperada da Trident ({response.status_code}) para {identificador}: {response.text}"
+            )
 
-async def fetch_trident_position_async(identificador: str) -> Optional[Dict[str, Any]]:
-    """Busca a posição na Trident com cache e normalização."""
-    if _is_cache_valid(_trident_cache, identificador):
-        logger.debug(f"Retornando posição do cache Trident para {identificador}")
-        return _trident_cache[identificador]["data"]
-
-    try:
-        raw = await _call_trident_api(identificador)
-    except asyncio.TimeoutError:
+        return None
+    except requests.exceptions.Timeout:
         logger.error(f"Timeout ao consultar Trident para {identificador}")
-        raw = None
-    except aiohttp.ClientError as exc:
+        return None
+    except requests.exceptions.RequestException as exc:
         logger.error(f"Erro de conexão com Trident para {identificador}: {exc}")
-        raw = None
-    except Exception as exc:
-        logger.exception(f"Erro inesperado ao consultar Trident para {identificador}: {exc}")
-        raw = None
-
-    position = _normalize_api_response(raw, identificador, "trident")
-    if position:
-        _set_cache(_trident_cache, identificador, position)
-        logger.info(f"Posição Trident obtida para {identificador}: ({position['latitude']}, {position['longitude']})")
-    return position
+        return None
 
 
-async def _call_spinergie_api(identificador: str) -> Optional[Any]:
+def _call_spinergie_api(identificador: str) -> Optional[Any]:
     """Executa a chamada HTTP ao endpoint da Spinergie."""
     if not SPINERGIE_API_KEY:
         logger.error("Variável de ambiente SPINERGIE_API_KEY não configurada")
@@ -483,58 +515,66 @@ async def _call_spinergie_api(identificador: str) -> Optional[Any]:
         "Content-Type": "application/json",
     }
     params = {"mmsi": identificador}
-    timeout = ClientTimeout(total=15)
+    timeout = 15
 
     logger.info(f"Consultando Spinergie para {identificador} - URL: {url}")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers, params=params) as response:
-            logger.debug(f"Spinergie respondeu {response.status} para {identificador}")
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=timeout)
+        logger.debug(f"Spinergie respondeu {response.status_code} para {identificador}")
 
-            if response.status == 200:
-                data = await response.json()
-                logger.debug(f"Resposta bruta da Spinergie para {identificador}: {data}")
-                if isinstance(data, list):
-                    return data[0] if data else None
-                if isinstance(data, dict):
-                    return data
-                return None
-
-            if response.status == 401:
-                logger.error("Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY")
-            elif response.status == 403:
-                logger.error("Acesso negado à API Spinergie (403)")
-            elif response.status == 404:
-                logger.warning(f"Embarcação não encontrada no Spinergie (404) para {identificador}")
-            elif response.status >= 500:
-                logger.error(f"Erro no servidor Spinergie ({response.status}) para {identificador}")
-            else:
-                body = await response.text()
-                logger.error(
-                    f"Resposta inesperada do Spinergie ({response.status}) para {identificador}: {body}"
-                )
-
+        if response.status_code == 200:
+            data = response.json()
+            logger.debug(f"Resposta bruta da Spinergie para {identificador}: {data}")
+            if isinstance(data, list):
+                return data[0] if data else None
+            if isinstance(data, dict):
+                return data
             return None
+
+        if response.status_code == 401:
+            logger.error("Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY")
+        elif response.status_code == 403:
+            logger.error("Acesso negado à API Spinergie (403)")
+        elif response.status_code == 404:
+            logger.warning(f"Embarcação não encontrada no Spinergie (404) para {identificador}")
+        elif response.status_code >= 500:
+            logger.error(f"Erro no servidor Spinergie ({response.status_code}) para {identificador}")
+        else:
+            logger.error(
+                f"Resposta inesperada do Spinergie ({response.status_code}) para {identificador}: {response.text}"
+            )
+
+        return None
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout ao consultar Spinergie para {identificador}")
+        return None
+    except requests.exceptions.RequestException as exc:
+        logger.error(f"Erro de conexão com Spinergie para {identificador}: {exc}")
+        return None
+
+
+async def fetch_trident_position_async(identificador: str) -> Optional[Dict[str, Any]]:
+    """Busca a posição na Trident com cache e normalização (assíncrono)."""
+    if _is_cache_valid(_trident_cache, identificador):
+        logger.debug(f"Retornando posição do cache Trident para {identificador}")
+        return _trident_cache[identificador]["data"]
+
+    raw = await asyncio.to_thread(_call_trident_api, identificador)
+    position = _normalize_api_response(raw, identificador, "trident")
+    if position:
+        _set_cache(_trident_cache, identificador, position)
+        logger.info(f"Posição Trident obtida para {identificador}: ({position['latitude']}, {position['longitude']})")
+    return position
 
 
 async def fetch_spinergie_position_async(identificador: str) -> Optional[Dict[str, Any]]:
-    """Busca a posição no Spinergie com cache e normalização."""
+    """Busca a posição no Spinergie com cache e normalização (assíncrono)."""
     if _is_cache_valid(_spinergie_cache, identificador):
         logger.debug(f"Retornando posição do cache Spinergie para {identificador}")
         return _spinergie_cache[identificador]["data"]
 
-    try:
-        raw = await _call_spinergie_api(identificador)
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout ao consultar Spinergie para {identificador}")
-        raw = None
-    except aiohttp.ClientError as exc:
-        logger.error(f"Erro de conexão com Spinergie para {identificador}: {exc}")
-        raw = None
-    except Exception as exc:
-        logger.exception(f"Erro inesperado ao consultar Spinergie para {identificador}: {exc}")
-        raw = None
-
+    raw = await asyncio.to_thread(_call_spinergie_api, identificador)
     position = _normalize_api_response(raw, identificador, "spinergie")
     if position:
         _set_cache(_spinergie_cache, identificador, position)
@@ -557,9 +597,7 @@ def get_all_vessels() -> List[UnidadeMaritima]:
 
 def get_vessel_position(mmsi: str) -> Optional[PosicaoAIS]:
     """Retorna posições mock locais quando as APIs externas não têm dados."""
-    mock_positions: Dict[str, Dict[str, Any]] = {
-        # Pode ser preenchido com dados de teste quando necessário.
-    }
+    mock_positions: Dict[str, Dict[str, Any]] = {}
     pos = mock_positions.get(mmsi)
     if pos:
         return PosicaoAIS(**pos)
@@ -567,7 +605,7 @@ def get_vessel_position(mmsi: str) -> Optional[PosicaoAIS]:
 
 
 # ---------------------------------------------------------------------------
-# Resolução de posição com fallback inteligente
+# Resolução de posição com fallback inteligente (assíncrono)
 # ---------------------------------------------------------------------------
 async def _resolver_posicao(identificador: str) -> Optional[Dict[str, Any]]:
     """
@@ -689,12 +727,48 @@ app = FastAPI(
     docs_url="/v1/docs",
     openapi_url="/v1/openapi.json",
     redoc_url="/v1/redoc",
+    swagger_ui_init_oauth={},  # Ativa autenticação no Swagger
+)
+
+# Configuração CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@app.get("/")
+def root():
+    """Endpoint raiz."""
+    return {"message": "IBAMA API"}
+
+
+@app.get("/health")
+def health():
+    """Endpoint de verificação de saúde (público)."""
+    return {"status": "ok"}
+
+
+@app.post("/auth/token", response_model=TokenResponse)
+async def login_for_access_token(
+    grant_type: str = Form(...),
+    client_id: str = Form(...),
+    client_secret: str = Form(...),
+):
+    """Autenticação OAuth2 Client Credentials."""
+    if grant_type != "client_credentials":
+        raise HTTPException(status_code=400, detail="Tipo de concessão inválido")
+    if not authenticate_client(client_id, client_secret):
+        raise HTTPException(status_code=401, detail="Credenciais de cliente inválidas")
+    access_token = create_access_token(data={"sub": client_id})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
 @app.get(
     "/v1/unidades",
     response_model=List[UnidadeMaritima],
@@ -710,10 +784,20 @@ app = FastAPI(
         "monitoradas. Plataformas são normalizadas para os nomes oficiais."
     ),
 )
-async def listar_unidades() -> List[UnidadeMaritima]:
+async def listar_unidades(
+    q: Optional[str] = None,
+    current_client: str = Depends(get_current_client_id),
+) -> List[UnidadeMaritima]:
     logger.info("Requisição recebida: GET /v1/unidades")
     try:
         unidades = get_all_vessels()
+        if q:
+            q_upper = q.upper()
+            unidades = [
+                u
+                for u in unidades
+                if q_upper in u.mmsi.upper() or q_upper in u.nome.upper()
+            ]
         unidades_normalizadas = [_normalizar_unidade(u) for u in unidades]
         logger.info(f"Listagem concluída: {len(unidades_normalizadas)} unidade(s) retornada(s)")
         return unidades_normalizadas
@@ -729,7 +813,7 @@ async def listar_unidades() -> List[UnidadeMaritima]:
 
 
 @app.get(
-    "/v1/posicao/{mmsi}",
+    "/v1/posicao/{identificador}",
     response_model=VesselPositionResponse,
     responses={
         400: {"model": ErrorResponse, "description": "Identificador inválido"},
@@ -745,20 +829,21 @@ async def listar_unidades() -> List[UnidadeMaritima]:
     ),
 )
 async def consultar_posicao(
-    mmsi: str = Path(
+    identificador: str = Path(
         ...,
-        title="MMSI ou identificador da plataforma",
+        title="MMSI, nome ou identificador da plataforma",
         description=(
-            "MMSI da embarcação com 9 dígitos ou identificador de plataforma fixa "
-            "(PPM-1, PCE-1, P-08, P-65)"
+            "MMSI da embarcação (9 dígitos), nome da embarcação ou identificador de "
+            "plataforma fixa (PPM-1, PCE-1, P-08, P-65)"
         ),
-        pattern=r"^(?:\d{9}|PPM-1|PCE-1|P-08|P-65)$",
         min_length=1,
-        max_length=9,
-    )
+    ),
+    current_client: str = Depends(get_current_client_id),
 ) -> VesselPositionResponse:
-    logger.info(f"Requisição recebida: GET /v1/posicao/{mmsi}")
-    _validar_identificador(mmsi)
+    logger.info(f"Requisição recebida: GET /v1/posicao/{identificador}")
+
+    # Resolve o identificador para o MMSI real
+    mmsi = _resolve_identificador(identificador)
 
     posicao = await _resolver_posicao(mmsi)
     if posicao:
