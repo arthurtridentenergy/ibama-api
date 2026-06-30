@@ -90,7 +90,7 @@ PLATFORMS_DATA = [
         "id": "P-65",
         "nome": "P-65",
         "tipo": TipoUnidade.UNIDADE_PRODUCAO,
-        "mmsi": 538003593,
+        "mmsi": "538003593",
         "latitude_base": -22.7018,
         "longitude_base": -40.6772,
         "licenca": "LO1572/2020",
@@ -99,7 +99,7 @@ PLATFORMS_DATA = [
         "id": "P-08",
         "nome": "P-08",
         "tipo": TipoUnidade.UNIDADE_PRODUCAO,
-        "mmsi": 538001903,
+        "mmsi": "538001903",
         "latitude_base": -22.6732,
         "longitude_base": -40.5465,
         "licenca": "LO1572/2020",
@@ -239,7 +239,7 @@ class VesselDataProvider:
                     logger.warning("Erro ao buscar MMSI %s: %s", mmsi, exc)
         return positions
 
-    def _simulate_positions(self) -> Dict[str, PosicaoAIS]:
+    ### def _simulate_positions(self) -> Dict[str, PosicaoAIS]:
         data: Dict[str, PosicaoAIS] = {}
         now = datetime.now(timezone.utc)
         t = now.timestamp() / 60.0
@@ -284,8 +284,19 @@ class VesselDataProvider:
                 timestamp=_now_iso(),
                 status=status,
             )
-        return data
+        return data ###
 
+def _simulate_positions(self):
+    data = {}
+    for key in self.positions:
+        data[key] = PosicaoAIS(
+            mmsi=str(key),  # ← CORRETO: converter para string
+            latitude=self.positions[key]["latitude"],
+            longitude=self.positions[key]["longitude"],
+            timestampAquisicao=datetime.now(timezone.utc).isoformat() + "Z",
+            status="FIXA",
+        )
+    return data
 
 # Instância global do provider
 provider = VesselDataProvider(cache_ttl_seconds=60)
