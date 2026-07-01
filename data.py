@@ -1,206 +1,209 @@
-# data.py — Dados mock para testes locais (API IBAMA)
-
-from datetime import datetime, timezone
-from typing import List, Optional
-
-from models import UnidadeMaritima, PosicaoAIS
+from typing import List, Dict, Optional, Any
+from services.spinergie_service import SpinergieService
 
 
-# ---------------------------------------------------------------------------
-# Constantes de MMSI
-# ---------------------------------------------------------------------------
-P65_MMSI = "538003593"        # P-65 (MMSI numérico real)
-P08_MMSI = "538001903"        # P-08 (MMSI numérico real)
-PPM1_MMSI = "PPM-1"           # Plataforma fixa (MMSI alfanumérico)
-PCE1_MMSI = "PCE-1"           # Plataforma fixa (MMSI alfanumérico)
-MAERSK_VENTURA_MMSI = "710002450"
-MAERSK_VEGA_MMSI = "710001720"
+# Instância do serviço Spinergie para busca de dados em tempo real
+spinergie_service = SpinergieService()
 
 
-# ---------------------------------------------------------------------------
-# Dados das unidades marítimas — Bacia de Santos (IBAMA)
-# ---------------------------------------------------------------------------
-_VESSELS: List[UnidadeMaritima] = [
-    # --- Plataformas Fixas ---
-    UnidadeMaritima(
-        nome="P-65",
-        imo=None,
-        mmsi="538003593",
-        tipoUnidade="PLATAFORMA_FIXA",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2020-09-01T00:00:00Z",
-        disponibilidadeFim="2029-09-01T00:00:00Z",
-        latitude=-22.701833,
-        longitude=-40.677167,
-        licenca_ibama="LO1572/2020",
-        validade_licenca="2024-07-11",
-        status_licenca="Renovação solicitada",
-        observacao_licenca="Aguardando manifestação do IBAMA",
-    ),
-    UnidadeMaritima(
-        nome="P-08",
-        imo=None,
-        mmsi="538001903",
-        tipoUnidade="PLATAFORMA_FIXA",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2021-03-15T00:00:00Z",
-        disponibilidadeFim="2028-03-15T00:00:00Z",
-        latitude=-22.673167,
-        longitude=-40.546500,
-        licenca_ibama="LO1572/2020",
-        validade_licenca="2024-07-11",
-        status_licenca="Renovação solicitada",
-        observacao_licenca="Aguardando manifestação do IBAMA",
-    ),
-    UnidadeMaritima(
-        nome="PPM-1",
-        imo=None,
-        mmsi="PPM-1",
-        tipoUnidade="PLATAFORMA_FIXA",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2023-01-01T00:00:00Z",
-        disponibilidadeFim="2027-12-31T00:00:00Z",
-        latitude=-22.798,
-        longitude=-40.7625,
-        licenca_ibama="LO1572/2020",
-        validade_licenca="2024-07-11",
-        status_licenca="Renovação solicitada",
-        observacao_licenca="Aguardando manifestação do IBAMA",
-    ),
-    UnidadeMaritima(
-        nome="PCE-1",
-        imo=None,
-        mmsi="PCE-1",
-        tipoUnidade="PLATAFORMA_FIXA",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2022-06-01T00:00:00Z",
-        disponibilidadeFim="2027-06-01T00:00:00Z",
-        latitude=-22.708333,
-        longitude=-40.693167,
-        licenca_ibama="LO1572/2020",
-        validade_licenca="2024-07-11",
-        status_licenca="Renovação solicitada",
-        observacao_licenca="Aguardando manifestação do IBAMA",
-    ),
-    # --- Embarcações de Apoio ---
-    UnidadeMaritima(
-        nome="MAERSK VENTURA",
-        imo=None,
-        mmsi="710002450",
-        tipoUnidade="EMBARCACAO_APOIO",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2024-01-01T00:00:00Z",
-        disponibilidadeFim=None,
-        licenca_ibama="LO1572/2020",
-        validade_licenca=None,
-        status_licenca="Anuência",
-        observacao_licenca="Licenciamento Ambiental nº 23341605/2025-Coprod/CGMac/Dilic (SEI 23341605)",
-    ),
-    UnidadeMaritima(
-        nome="MAERSK VEGA",
-        imo=None,
-        mmsi="710001720",
-        tipoUnidade="EMBARCACAO_APOIO",
-        licencasAutorizadas=["LO1572/2020"],
-        disponibilidadeInicio="2024-01-01T00:00:00Z",
-        disponibilidadeFim=None,
-        licenca_ibama="LO1572/2020",
-        validade_licenca=None,
-        status_licenca="Ofício",
-        observacao_licenca="Ofício nº 163/2024/COPROD/CGMAC/DILIC (SEI 18951971)",
-    ),
+# Embarcações monitoradas (MMSI numérico e identificador alfanumérico)
+VESSELS: List[Dict[str, Any]] = [
+    {
+        "name": "Maersk Ventura",
+        "mmsi": "710002450",
+        "mmsi_numeric": 710002450,
+        "mmsi_alphanumeric": "MAERSK-VENTURA-710002450",
+        "imo": None,
+        "callsign": None,
+        "type": "OSV / PSV",
+    },
+    {
+        "name": "Maersk Vega",
+        "mmsi": "710001720",
+        "mmsi_numeric": 710001720,
+        "mmsi_alphanumeric": "MAERSK-VEGA-710001720",
+        "imo": None,
+        "callsign": None,
+        "type": "OSV / PSV",
+    },
 ]
 
 
-# ---------------------------------------------------------------------------
-# Funções de acesso
-# ---------------------------------------------------------------------------
-def get_all_vessels() -> List[UnidadeMaritima]:
-    """Retorna lista de unidades marítimas com dados reais da Bacia de Santos conforme IBAMA."""
-    return list(_VESSELS)
+# Plataformas hardcoded retornadas pelo sistema
+PLATFORMS: List[Dict[str, Any]] = [
+    {
+        "id": "P-65",
+        "name": "P-65",
+        "type": "Plataforma semissubmersível",
+        "operator": "Petrobras",
+        "basin": "Bacia de Campos",
+    },
+    {
+        "id": "P-08",
+        "name": "P-08",
+        "type": "Plataforma fixa",
+        "operator": "Petrobras",
+        "basin": "Bacia de Campos",
+    },
+    {
+        "id": "PPM-1",
+        "name": "PPM-1",
+        "type": "Plataforma de produção",
+        "operator": "Petrobras",
+        "basin": "Bacia de Campos",
+    },
+    {
+        "id": "PCE-1",
+        "name": "PCE-1",
+        "type": "Plataforma de produção",
+        "operator": "Petrobras",
+        "basin": "Bacia de Campos",
+    },
+]
 
 
-def get_vessel_by_mmsi(mmsi: str) -> Optional[UnidadeMaritima]:
-    """
-    Busca unidade marítima por MMSI.
+def _normalize_mmsi(mmsi: Any) -> str:
+    """Normaliza o MMSI recebido para string, removendo espaços e hífens."""
+    if mmsi is None:
+        return ""
+    return str(mmsi).strip().replace("-", "").replace(" ", "")
 
-    Suporta MMSI numérico (ex: 710002450, 538003593) e alfanumérico
-    (ex: PPM-1, PCE-1).
-    """
-    if not mmsi:
+
+def _match_vessel(vessel: Dict[str, Any], identifier: str) -> bool:
+    """Verifica se a embarcação corresponde ao identificador (MMSI numérico,
+    alfanumérico ou nome)."""
+    identifier = identifier.strip()
+    if not identifier:
+        return False
+
+    normalized = _normalize_mmsi(identifier)
+    lower = identifier.lower()
+
+    candidates = [
+        str(vessel.get("mmsi", "")),
+        str(vessel.get("mmsi_numeric", "")),
+        str(vessel.get("mmsi_alphanumeric", "")),
+        _normalize_mmsi(vessel.get("mmsi_alphanumeric", "")),
+        str(vessel.get("name", "")).lower(),
+    ]
+
+    for candidate in candidates:
+        candidate_str = str(candidate).strip()
+        if not candidate_str:
+            continue
+        if candidate_str == identifier or candidate_str == normalized or candidate_str.lower() == lower:
+            return True
+    return False
+
+
+def _enrich_vessel(vessel: Dict[str, Any], realtime_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Combina os dados base da embarcação com os dados em tempo real do Spinergie."""
+    enriched = dict(vessel)
+    if realtime_data:
+        enriched["realtime"] = realtime_data
+        enriched["latitude"] = realtime_data.get("latitude")
+        enriched["longitude"] = realtime_data.get("longitude")
+        enriched["speed"] = realtime_data.get("speed")
+        enriched["heading"] = realtime_data.get("heading")
+        enriched["course"] = realtime_data.get("course")
+        enriched["status"] = realtime_data.get("status")
+        enriched["last_update"] = realtime_data.get("timestamp") or realtime_data.get("last_update")
+        if realtime_data.get("imo"):
+            enriched["imo"] = realtime_data.get("imo")
+        if realtime_data.get("callsign"):
+            enriched["callsign"] = realtime_data.get("callsign")
+    else:
+        enriched["realtime"] = None
+    return enriched
+
+
+def get_all_vessels() -> List[Dict[str, Any]]:
+    """Retorna todas as embarcações monitoradas com dados em tempo real do Spinergie."""
+    result: List[Dict[str, Any]] = []
+    for vessel in VESSELS:
+        try:
+            realtime_data = spinergie_service.get_vessel_data(vessel["mmsi"])
+        except Exception as exc:
+            print(f"[data] Erro ao buscar dados em tempo real para {vessel['name']}: {exc}")
+            realtime_data = None
+        result.append(_enrich_vessel(vessel, realtime_data))
+    return result
+
+
+def get_vessel_by_mmsi(mmsi: Any) -> Optional[Dict[str, Any]]:
+    """Busca uma embarcação pelo MMSI (numérico, alfanumérico ou string).
+    Retorna None caso não seja encontrada."""
+    identifier = str(mmsi).strip() if mmsi is not None else ""
+    if not identifier:
         return None
-    mmsi_clean = str(mmsi).strip()
-    for vessel in _VESSELS:
-        if vessel.mmsi == mmsi_clean:
-            return vessel
+
+    for vessel in VESSELS:
+        if _match_vessel(vessel, identifier):
+            try:
+                realtime_data = spinergie_service.get_vessel_data(vessel["mmsi"])
+            except Exception as exc:
+                print(f"[data] Erro ao buscar dados em tempo real para {vessel['name']}: {exc}")
+                realtime_data = None
+            return _enrich_vessel(vessel, realtime_data)
     return None
 
 
-def get_vessel_by_name(name: str) -> Optional[UnidadeMaritima]:
-    """
-    Busca unidade marítima por nome (case-insensitive).
-
-    Exemplos: "P-65", "maersk ventura", "PPM-1".
-    """
+def get_vessel_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Busca uma embarcação pelo nome (case-insensitive).
+    Retorna None caso não seja encontrada."""
     if not name:
         return None
-    name_clean = str(name).strip().upper()
-    for vessel in _VESSELS:
-        if vessel.nome.strip().upper() == name_clean:
-            return vessel
+
+    target = name.strip().lower()
+    for vessel in VESSELS:
+        if str(vessel.get("name", "")).strip().lower() == target:
+            try:
+                realtime_data = spinergie_service.get_vessel_data(vessel["mmsi"])
+            except Exception as exc:
+                print(f"[data] Erro ao buscar dados em tempo real para {vessel['name']}: {exc}")
+                realtime_data = None
+            return _enrich_vessel(vessel, realtime_data)
     return None
 
 
-def get_vessel_position(mmsi: str) -> Optional[PosicaoAIS]:
-    """
-    Retorna posição mock para um vessel específico, com coordenadas
-    realistas da Bacia de Santos.
+def get_vessel_position(mmsi: Any) -> Optional[Dict[str, Any]]:
+    """Retorna a posição em tempo real de uma embarcação pelo MMSI.
+    Suporta MMSI numérico, alfanumérico e nome como fallback."""
+    vessel = get_vessel_by_mmsi(mmsi)
+    if vessel is None and isinstance(mmsi, str):
+        vessel = get_vessel_by_name(mmsi)
 
-    Suporta MMSI numérico (ex: 710002450) e alfanumérico (ex: PPM-1).
-    """
-    if not mmsi:
+    if vessel is None:
         return None
 
-    mmsi_clean = str(mmsi).strip()
-    now = datetime.now(timezone.utc).isoformat() + "Z"
+    realtime = vessel.get("realtime")
+    if not realtime:
+        return None
 
-    positions = {
-        "538003593": PosicaoAIS(  # P-65
-            mmsi="538003593",
-            latitude=-22.701833,
-            longitude=-40.677167,
-            timestampAquisicao=now,
-        ),
-        "538001903": PosicaoAIS(  # P-08
-            mmsi="538001903",
-            latitude=-22.673167,
-            longitude=-40.546500,
-            timestampAquisicao=now,
-        ),
-        "PPM-1": PosicaoAIS(
-            mmsi="PPM-1",
-            latitude=-22.798,
-            longitude=-40.7625,
-            timestampAquisicao=now,
-        ),
-        "PCE-1": PosicaoAIS(
-            mmsi="PCE-1",
-            latitude=-22.708333,
-            longitude=-40.693167,
-            timestampAquisicao=now,
-        ),
-        "710002450": PosicaoAIS(  # Maersk Ventura
-            mmsi="710002450",
-            latitude=-22.9068,
-            longitude=-43.1729,
-            timestampAquisicao=now,
-        ),
-        "710001720": PosicaoAIS(  # Maersk Vega
-            mmsi="710001720",
-            latitude=-23.5505,
-            longitude=-46.6333,
-            timestampAquisicao=now,
-        ),
+    return {
+        "mmsi": vessel.get("mmsi"),
+        "name": vessel.get("name"),
+        "latitude": realtime.get("latitude"),
+        "longitude": realtime.get("longitude"),
+        "speed": realtime.get("speed"),
+        "heading": realtime.get("heading"),
+        "course": realtime.get("course"),
+        "status": realtime.get("status"),
+        "timestamp": realtime.get("timestamp") or realtime.get("last_update"),
     }
 
-    return positions.get(mmsi_clean)
+
+def get_all_platforms() -> List[Dict[str, Any]]:
+    """Retorna a lista de plataformas hardcoded."""
+    return [dict(platform) for platform in PLATFORMS]
+
+
+def get_platform_by_id(platform_id: str) -> Optional[Dict[str, Any]]:
+    """Retorna uma plataforma pelo seu identificador."""
+    if not platform_id:
+        return None
+    target = platform_id.strip().lower()
+    for platform in PLATFORMS:
+        if str(platform.get("id", "")).strip().lower() == target:
+            return dict(platform)
+    return None
