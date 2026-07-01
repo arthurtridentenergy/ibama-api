@@ -1,410 +1,189 @@
-import math
-import time
 import logging
-from datetime import datetime, timezone
-from typing import Optional, Dict, List, Any, Union
+import asyncio
+from datetime import datetime
+from typing import List, Optional, Sequence
 
-try:
-    from spinergie_service import SpinergieService
-except ImportError:
-    SpinergieService = None
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, select, update, delete, func
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncAttrs
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 
-logger = logging.getLogger(__name__)
+# Configuração de Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("data_layer")
 
-# ---------------------------------------------------------------------------
-# Configuração do serviço Spinergie
-# ---------------------------------------------------------------------------
+# Configuração do Banco de Dados (SQLite Async para exemplo)
+DATABASE_URL = "sqlite+aiosqlite:///./ibama_monitor.db"
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-_spinergie_service: Optional["SpinergieService"] = None
+# Modelos
+class Base(AsyncAttrs, DeclarativeBase):
+    pass
 
+class Unidade(Base):
+    __tablename__ = "unidades"
 
-def _get_spinergie_service() -> Optional["SpinergieService"]:
-    """Retorna instância singleton do SpinergieService, se disponível."""
-    global _spinergie_service
-    if SpinergieService is None:
-        logger.warning("SpinergieService não disponível — usando simulação local.")
-        return None
-    if _spinergie_service is None:
-        try:
-            _spinergie_service = SpinergieService()
-        except Exception as exc:
-            logger.error("Falha ao inicializar SpinergieService: %s", exc)
-            _spinergie_service = None
-    return _spinergie_service
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nome: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    tipo: Mapped[str] = mapped_column(String(50), nullable=False)  # Ex: FPSO, SS, Fixed
+    status: Mapped[str] = mapped_column(String(20), default="Ativa")
+    
+    posicoes: Mapped[List["Posicao"]] = relationship("Posicao", back_populates="unidade", cascade="all, delete-orphan")
 
+    def __repr__(self):
+        return f"<Unidade(id={self.id}, nome='{self.nome}')>"
 
-# ---------------------------------------------------------------------------
-# Utilidades
-# ---------------------------------------------------------------------------
+class Posicao(Base):
+    __tablename__ = "posicoes"
 
-def _iso_timestamp() -> str:
-    """Retorna timestamp atual em ISO 8601 com sufixo Z (UTC)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    unidade_id: Mapped[int] = mapped_column(ForeignKey("unidades.id"), nullable=False)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    unidade: Mapped["Unidade"] = relationship("Unidade", back_populates="posicoes")
 
-def _normalize_identifier(identifier: str) -> str:
-    """Normaliza MMSI ou nome para comparação (sem espaços, maiúsculas)."""
-    return str(identifier).strip().upper().replace(" ", "")
+    def __repr__(self):
+        return f"<Posicao(id={self.id}, lat={self.latitude}, lon={self.longitude})>"
 
+# 1) Inicializar Banco de Dados
+async def init_db():
+    logger.info("Iniciando criação das tabelas...")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Tabelas criadas com sucesso.")
 
-def _simulate_circular_position(
-    center_lat: float,
-    center_lon: float,
-    radius_nm: float = 2.0,
-    period_seconds: float = 3600.0,
-    timestamp: Optional[float] = None,
-) -> Dict[str, Any]:
+# 2) Seed de Dados Iniciais (Plataformas IBAMA)
+async def seed_data():
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            # Verificar se já existem dados
+            result = await session.execute(select(func.count(Unidade.id)))
+            count = result.scalar()
+            
+            if count == 0:
+                logger.info("Semeando dados iniciais de plataformas IBAMA...")
+                plataformas = [
+                    Unidade(nome="P-50", tipo="FPSO", status="Ativa"),
+                    Unidade(nome="P-51", tipo="Semi-Submersível", status="Ativa"),
+                    Unidade(nome="P-53", tipo="FPSO", status="Manutenção"),
+                    Unidade(nome="P-62", tipo="FPSO", status="Ativa"),
+                    Unidade(nome="P-70", tipo="FPSO", status="Ativa")
+                ]
+                session.add_all(plataformas)
+                logger.info("Seed concluído.")
+            else:
+                logger.info("Banco de dados já contém registros. Pulando seed.")
+
+# 3) Funções CRUD para Unidade
+async def create_unidade(nome: str, tipo: str, status: str = "Ativa") -> Unidade:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            nova_unidade = Unidade(nome=nome, tipo=tipo, status=status)
+            session.add(nova_unidade)
+            logger.info(f"Unidade criada: {nome}")
+            return nova_unidade
+
+async def get_unidade_by_id(unidade_id: int) -> Optional[Unidade]:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Unidade).where(Unidade.id == unidade_id))
+        return result.scalar_one_or_none()
+
+async def update_unidade(unidade_id: int, **kwargs) -> bool:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = update(Unidade).where(Unidade.id == unidade_id).values(**kwargs)
+            result = await session.execute(stmt)
+            logger.info(f"Unidade {unidade_id} atualizada.")
+            return result.rowcount > 0
+
+async def delete_unidade(unidade_id: int) -> bool:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stmt = delete(Unidade).where(Unidade.id == unidade_id)
+            result = await session.execute(stmt)
+            logger.info(f"Unidade {unidade_id} removida.")
+            return result.rowcount > 0
+
+# CRUD para Posicao
+async def add_posicao(unidade_id: int, lat: float, lon: float) -> Posicao:
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            pos = Posicao(unidade_id=unidade_id, latitude=lat, longitude=lon)
+            session.add(pos)
+            logger.info(f"Nova posição registrada para unidade {unidade_id}")
+            return pos
+
+# 4) Queries com Filtros e Paginação
+async def get_unidades_paginated(
+    nome_filter: Optional[str] = None, 
+    tipo_filter: Optional[str] = None, 
+    page: int = 1, 
+    page_size: int = 10
+) -> Sequence[Unidade]:
+    async with AsyncSessionLocal() as session:
+        query = select(Unidade)
+        
+        if nome_filter:
+            query = query.where(Unidade.nome.ilike(f"%{nome_filter}%"))
+        if tipo_filter:
+            query = query.where(Unidade.tipo == tipo_filter)
+            
+        offset = (page - 1) * page_size
+        query = query.offset(offset).limit(page_size)
+        
+        result = await session.execute(query)
+        return result.scalars().all()
+
+async def get_posicoes_history(unidade_id: int, limit: int = 50) -> Sequence[Posicao]:
+    async with AsyncSessionLocal() as session:
+        query = select(Posicao).where(Posicao.unidade_id == unidade_id).order_by(Posicao.timestamp.desc()).limit(limit)
+        result = await session.execute(query)
+        return result.scalars().all()
+
+# 5) Transação Assíncrona Complexa (Exemplo)
+async def registrar_movimentacao_unidade(unidade_id: int, nova_lat: float, nova_lon: float, novo_status: Optional[str] = None):
     """
-    Simula movimento circular ao redor de um ponto central.
-
-    Args:
-        center_lat: Latitude do centro em graus decimais.
-        center_lon: Longitude do centro em graus decimais.
-        radius_nm: Raio da órbita em milhas náuticas.
-        period_seconds: Período de uma volta completa em segundos.
-        timestamp: Timestamp Unix opcional (usa time.time() se None).
-
-    Returns:
-        Dicionário com latitude, longitude e timestamp ISO 8601.
+    Exemplo de transação atômica: Atualiza status da unidade e insere nova posição.
     """
-    if timestamp is None:
-        timestamp = time.time()
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            try:
+                # 1. Atualizar Unidade
+                if novo_status:
+                    await session.execute(
+                        update(Unidade).where(Unidade.id == unidade_id).values(status=novo_status)
+                    )
+                
+                # 2. Inserir Posição
+                nova_pos = Posicao(unidade_id=unidade_id, latitude=nova_lat, longitude=nova_lon)
+                session.add(nova_pos)
+                
+                logger.info(f"Transação de movimentação concluída para Unidade {unidade_id}")
+            except Exception as e:
+                logger.error(f"Erro na transação: {e}")
+                await session.rollback()
+                raise
 
-    angle = (2.0 * math.pi * (timestamp % period_seconds)) / period_seconds
+# Exemplo de execução principal
+async def main():
+    await init_db()
+    await seed_data()
+    
+    # Teste de listagem com paginação
+    unidades = await get_unidades_paginated(tipo_filter="FPSO", page=1, page_size=2)
+    print(f"Unidades encontradas: {[u.nome for u in unidades]}")
+    
+    # Teste de transação
+    if unidades:
+        uid = unidades[0].id
+        await registrar_movimentacao_unidade(uid, -22.5, -40.3, "Operando")
+        
+    logger.info("Processamento finalizado.")
 
-    # Converter milhas náuticas para graus (1 NM ≈ 1/60 grau)
-    radius_deg = radius_nm / 60.0
-
-    delta_lat = radius_deg * math.cos(angle)
-    delta_lon = radius_deg * math.sin(angle) / max(math.cos(math.radians(center_lat)), 0.01)
-
-    return {
-        "latitude": round(center_lat + delta_lat, 6),
-        "longitude": round(center_lon + delta_lon, 6),
-        "timestamp": _iso_timestamp(),
-        "source": "simulation",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Plataformas (hardcoded)
-# ---------------------------------------------------------------------------
-
-PLATFORMS: List[Dict[str, Any]] = [
-    {
-        "name": "P-65",
-        "mmsi": "P65-IBAMA-001",
-        "type": "platform",
-        "latitude": -22.7833,
-        "longitude": -41.8667,
-        "ibama_license": "IBAMA-2018-P65-OP-001",
-        "operator": "Petrobras",
-        "field": "Bacia de Campos",
-        "status": "active",
-    },
-    {
-        "name": "P-08",
-        "mmsi": "P08-IBAMA-002",
-        "type": "platform",
-        "latitude": -23.4500,
-        "longitude": -42.0167,
-        "ibama_license": "IBAMA-2019-P08-OP-002",
-        "operator": "Petrobras",
-        "field": "Bacia de Campos",
-        "status": "active",
-    },
-    {
-        "name": "PPM-1",
-        "mmsi": "PPM1-IBAMA-003",
-        "type": "platform",
-        "latitude": -24.1167,
-        "longitude": -42.2333,
-        "ibama_license": "IBAMA-2020-PPM1-OP-003",
-        "operator": "Petrobras",
-        "field": "Bacia de Campos",
-        "status": "active",
-    },
-    {
-        "name": "PCE-1",
-        "mmsi": "PCE1-IBAMA-004",
-        "type": "platform",
-        "latitude": -25.2833,
-        "longitude": -42.5333,
-        "ibama_license": "IBAMA-2021-PCE1-OP-004",
-        "operator": "Petrobras",
-        "field": "Bacia de Santos",
-        "status": "active",
-    },
-]
-
-# ---------------------------------------------------------------------------
-# Embarcações (buscam dados em tempo real da API Spinergie)
-# ---------------------------------------------------------------------------
-
-VESSELS: List[Dict[str, Any]] = [
-    {
-        "name": "Maersk Ventura",
-        "mmsi": "710002450",
-        "type": "vessel",
-        "imo": "9776018",
-        "operator": "Maersk Supply Service",
-        "base_latitude": -22.5000,
-        "base_longitude": -41.5000,
-        "sim_radius_nm": 3.0,
-        "sim_period_seconds": 1800.0,
-        "status": "active",
-    },
-    {
-        "name": "Maersk Vega",
-        "mmsi": "710001720",
-        "type": "vessel",
-        "imo": "9776020",
-        "operator": "Maersk Supply Service",
-        "base_latitude": -23.2000,
-        "base_longitude": -42.1000,
-        "sim_radius_nm": 2.5,
-        "sim_period_seconds": 2400.0,
-        "status": "active",
-    },
-]
-
-
-# ---------------------------------------------------------------------------
-# Cache interno de posições em tempo real
-# ---------------------------------------------------------------------------
-
-_position_cache: Dict[str, Dict[str, Any]] = {}
-
-
-def _fetch_vessel_position_from_api(vessel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Busca posição em tempo real da API Spinergie para uma embarcação.
-
-    Returns:
-        Dicionário com latitude, longitude, speed, course, timestamp e source,
-        ou None se a API falhar.
-    """
-    service = _get_spinergie_service()
-    if service is None:
-        return None
-
-    mmsi = vessel.get("mmsi", "")
+if __name__ == "__main__":
     try:
-        position = service.get_vessel_position(mmsi)
-        if position and isinstance(position, dict):
-            lat = position.get("latitude") or position.get("lat")
-            lon = position.get("longitude") or position.get("lon") or position.get("lng")
-            if lat is not None and lon is not None:
-                return {
-                    "latitude": float(lat),
-                    "longitude": float(lon),
-                    "speed": position.get("speed"),
-                    "course": position.get("course"),
-                    "heading": position.get("heading"),
-                    "timestamp": position.get("timestamp", _iso_timestamp()),
-                    "source": "spinergie_api",
-                }
-        logger.warning("SpinergieService retornou dados incompletos para MMSI %s", mmsi)
-        return None
-    except Exception as exc:
-        logger.error("Erro ao buscar posição via Spinergie para MMSI %s: %s", mmsi, exc)
-        return None
-
-
-def _get_vessel_simulated_position(vessel: Dict[str, Any]) -> Dict[str, Any]:
-    """Gera posição simulada (movimento circular) para uma embarcação."""
-    return _simulate_circular_position(
-        center_lat=vessel.get("base_latitude", -22.5),
-        center_lon=vessel.get("base_longitude", -41.5),
-        radius_nm=vessel.get("sim_radius_nm", 2.0),
-        period_seconds=vessel.get("sim_period_seconds", 3600.0),
-    )
-
-
-def _resolve_vessel_position(vessel: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Resolve a posição de uma embarcação: tenta API Spinergie primeiro,
-    e usa simulação circular como fallback.
-    """
-    mmsi = vessel.get("mmsi", "")
-
-    # Tentar cache primeiro
-    cached = _position_cache.get(mmsi)
-    if cached and (time.time() - cached.get("_cache_time", 0)) < 30:
-        return cached
-
-    # Tentar API em tempo real
-    position = _fetch_vessel_position_from_api(vessel)
-
-    if position is None:
-        # Fallback: simulação de movimento circular
-        position = _get_vessel_simulated_position(vessel)
-
-    # Enriquecer com dados da embarcação
-    position["_cache_time"] = time.time()
-    _position_cache[mmsi] = position
-    return position
-
-
-def _build_vessel_record(vessel: Dict[str, Any], include_position: bool = True) -> Dict[str, Any]:
-    """Constrói registro completo de embarcação com posição resolvida."""
-    record = {
-        "name": vessel.get("name"),
-        "mmsi": vessel.get("mmsi"),
-        "type": vessel.get("type"),
-        "operator": vessel.get("operator"),
-        "status": vessel.get("status"),
-    }
-
-    if vessel.get("imo"):
-        record["imo"] = vessel.get("imo")
-
-    if include_position:
-        position = _resolve_vessel_position(vessel)
-        record["latitude"] = position.get("latitude")
-        record["longitude"] = position.get("longitude")
-        record["timestamp"] = position.get("timestamp", _iso_timestamp())
-        record["source"] = position.get("source", "unknown")
-        if position.get("speed") is not None:
-            record["speed"] = position.get("speed")
-        if position.get("course") is not None:
-            record["course"] = position.get("course")
-        if position.get("heading") is not None:
-            record["heading"] = position.get("heading")
-
-    return record
-
-
-def _build_platform_record(platform: Dict[str, Any]) -> Dict[str, Any]:
-    """Constrói registro completo de plataforma (posição fixa)."""
-    return {
-        "name": platform.get("name"),
-        "mmsi": platform.get("mmsi"),
-        "type": platform.get("type"),
-        "latitude": platform.get("latitude"),
-        "longitude": platform.get("longitude"),
-        "ibama_license": platform.get("ibama_license"),
-        "operator": platform.get("operator"),
-        "field": platform.get("field"),
-        "status": platform.get("status"),
-        "timestamp": _iso_timestamp(),
-        "source": "static",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Funções públicas da API
-# ---------------------------------------------------------------------------
-
-def get_all_vessels() -> List[Dict[str, Any]]:
-    """
-    Retorna todas as plataformas e embarcações com suas posições.
-
-    Returns:
-        Lista de dicionários contendo dados de cada unidade (plataforma ou embarcação).
-    """
-    results: List[Dict[str, Any]] = []
-
-    for platform in PLATFORMS:
-        results.append(_build_platform_record(platform))
-
-    for vessel in VESSELS:
-        results.append(_build_vessel_record(vessel, include_position=True))
-
-    return results
-
-
-def get_vessel_by_mmsi(mmsi: Union[str, int]) -> Optional[Dict[str, Any]]:
-    """
-    Busca uma unidade (plataforma ou embarcação) pelo MMSI.
-
-    Suporta MMSI numérico (ex: 710002450) e alfanumérico (ex: P65-IBAMA-001).
-
-    Args:
-        mmsi: MMSI numérico ou alfanumérico.
-
-    Returns:
-        Dicionário com dados da unidade ou None se não encontrada.
-    """
-    normalized = _normalize_identifier(str(mmsi))
-
-    # Buscar em plataformas (MMSI alfanumérico)
-    for platform in PLATFORMS:
-        if _normalize_identifier(platform.get("mmsi", "")) == normalized:
-            return _build_platform_record(platform)
-
-    # Buscar em embarcações (MMSI numérico)
-    for vessel in VESSELS:
-        if _normalize_identifier(vessel.get("mmsi", "")) == normalized:
-            return _build_vessel_record(vessel, include_position=True)
-
-    return None
-
-
-def get_vessel_by_name(name: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca uma unidade (plataforma ou embarcação) pelo nome.
-
-    A busca é case-insensitive e ignora espaços extras.
-
-    Args:
-        name: Nome da plataforma ou embarcação.
-
-    Returns:
-        Dicionário com dados da unidade ou None se não encontrada.
-    """
-    normalized = _normalize_identifier(name)
-
-    for platform in PLATFORMS:
-        if _normalize_identifier(platform.get("name", "")) == normalized:
-            return _build_platform_record(platform)
-
-    for vessel in VESSELS:
-        if _normalize_identifier(vessel.get("name", "")) == normalized:
-            return _build_vessel_record(vessel, include_position=True)
-
-    return None
-
-
-def get_vessel_position(identifier: Union[str, int]) -> Optional[Dict[str, Any]]:
-    """
-    Retorna a posição de uma unidade (plataforma ou embarcação).
-
-    Aceita MMSI (numérico ou alfanumérico) ou nome como identificador.
-    Para embarcações, tenta a API Spinergie em tempo real; se falhar,
-    usa simulação de movimento circular.
-
-    Args:
-        identifier: MMSI ou nome da unidade.
-
-    Returns:
-        Dicionário com name, mmsi, latitude, longitude, timestamp e source,
-        ou None se a unidade não for encontrada.
-    """
-    record = get_vessel_by_mmsi(identifier)
-    if record is None:
-        record = get_vessel_by_name(identifier)
-
-    if record is None:
-        return None
-
-    return {
-        "name": record.get("name"),
-        "mmsi": record.get("mmsi"),
-        "type": record.get("type"),
-        "latitude": record.get("latitude"),
-        "longitude": record.get("longitude"),
-        "timestamp": record.get("timestamp", _iso_timestamp()),
-        "source": record.get("source", "unknown"),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Inicialização
-# ---------------------------------------------------------------------------
-
-def refresh_all_positions() -> None:
-    """Limpa cache de posições, forçando nova busca na API na próxima chamada."""
-    global _position_cache
-    _position_cache = {}
-    logger.info("Cache de posições limpo.")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
