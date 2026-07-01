@@ -5,180 +5,346 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
 class TipoUnidade(str, Enum):
-    EMBARCACAO_EMERGENCIA = 'EMBARCACAO_EMERGENCIA'
-    EMBARCACAO_APOIO = 'EMBARCACAO_APOIO'
-    EMBARCACAO_MONITORAMENTO = 'EMBARCACAO_MONITORAMENTO'
-    UNIDADE_PRODUCAO = 'UNIDADE_PRODUCAO'
-    PLATAFORMA_FIXA = 'PLATAFORMA_FIXA'
-    PLATAFORMA_MOVEL = 'PLATAFORMA_MOVEL'
-
-_MOBILE_TYPES = {
-    TipoUnidade.EMBARCACAO_EMERGENCIA,
-    TipoUnidade.EMBARCACAO_APOIO,
-    TipoUnidade.EMBARCACAO_MONITORAMENTO,
-    TipoUnidade.PLATAFORMA_MOVEL,
-}
-
-_FIXED_TYPES = {TipoUnidade.UNIDADE_PRODUCAO, TipoUnidade.PLATAFORMA_FIXA}
+    EMBARCACAO_APOIO = "EMBARCACAO_APOIO"
+    EMBARCACAO_PRODUCAO = "EMBARCACAO_PRODUCAO"
+    PLATAFORMA_FIXA = "PLATAFORMA_FIXA"
 
 
+class StatusUnidade(str, Enum):
+    ATIVA = "ATIVA"
+    INATIVA = "INATIVA"
+    MANUTENCAO = "MANUTENCAO"
+
+
+class StatusAIS(str, Enum):
+    UNDER_WAY_USING_ENGINE = "UNDER WAY USING ENGINE"
+    AT_ANCHOR = "AT ANCHOR"
+    MOORED = "MOORED"
+    UNDER_WAY_SAILING = "UNDER WAY SAILING"
+    NOT_DEFINED = "NOT DEFINED"
+
+
+# ---------------------------------------------------------------------------
+# UnidadeMaritima
+# ---------------------------------------------------------------------------
 class UnidadeMaritima(BaseModel):
-    mmsi: str = Field(
-        ...,
-        min_length=9,
-        max_length=9,
-        pattern=r'^\\d{9}$',
-        description='MMSI de 9 digitos numericos',
-        examples=['710001720'],
+    model_config = ConfigDict(
+        use_enum_values=False,
+        validate_assignment=True,
+        json_schema_extra={
+            "example": {
+                "nome": "MAERSK VEGA",
+                "imo": "1234567",
+                "mmsi": "710001720",
+                "tipoUnidade": "EMBARCACAO_APOIO",
+                "licencasAutorizadas": ["LO1572/2020", "LPS123/2025"],
+                "disponibilidadeInicio": "2024-01-01T00:00:00Z",
+                "disponibilidadeFim": "2026-12-31T00:00:00Z",
+                "status": "ATIVA",
+                "observacoes": "Embarcação de apoio licenciada pelo IBAMA para operação na Bacia de Santos",
+            }
+        },
     )
+
     nome: str = Field(
         ...,
         min_length=1,
-        description='Nome da unidade maritima',
-        examples=['MAERSK VEGA'],
+        description="Nome da unidade marítima",
+        examples=["MAERSK VEGA", "P-65", "PPM-1"],
     )
     imo: Optional[str] = Field(
         default=None,
-        pattern=r'^\\d{7}$',
-        description='Numero IMO de 7 digitos numericos, quando aplicavel',
-        examples=['1234567'],
+        pattern=r"^\d{7}$",
+        description="Número IMO de 7 dígitos numéricos, quando aplicável",
+        examples=["1234567"],
+    )
+    mmsi: Optional[str] = Field(
+        default=None,
+        description="MMSI da embarcação (string numérica de 9 dígitos ou identificador alfanumérico para plataformas fixas sem MMSI)",
+        examples=["710001720", "538003593", "PPM-1"],
     )
     tipoUnidade: TipoUnidade = Field(
         ...,
-        description='Tipo da unidade (embarcacao movel ou plataforma fixa)',
-        examples=['EMBARCACAO_EMERGENCIA'],
+        description="Tipo da unidade marítima conforme classificação IBAMA",
+        examples=[TipoUnidade.EMBARCACAO_APOIO],
     )
     licencasAutorizadas: List[str] = Field(
         default_factory=list,
-        description='Licencas/autorizacoes vigentes',
-        examples=[['LO1234/2025', 'LPS123/2025']],
+        description="Lista de licenças/autorizações vigentes emitidas pelo IBAMA",
+        examples=[["LO1572/2020", "LPS123/2025"]],
     )
     disponibilidadeInicio: Optional[datetime] = Field(
         default=None,
-        description='Inicio do periodo de disponibilidade',
+        description="Início do período de disponibilidade da unidade (ISO 8601 UTC)",
+        examples=["2024-01-01T00:00:00Z"],
     )
     disponibilidadeFim: Optional[datetime] = Field(
         default=None,
-        description='Fim do periodo de disponibilidade',
+        description="Fim do período de disponibilidade da unidade (ISO 8601 UTC)",
+        examples=["2026-12-31T00:00:00Z"],
     )
-    latitude: Optional[float] = Field(
-        default=None,
-        ge=-90,
-        le=90,
-        description='Latitude estatica para plataformas fixas',
-        examples=[-22.9068],
+    status: StatusUnidade = Field(
+        default=StatusUnidade.ATIVA,
+        description="Status operacional da unidade marítima",
+        examples=[StatusUnidade.ATIVA],
     )
-    longitude: Optional[float] = Field(
+    observacoes: Optional[str] = Field(
         default=None,
-        ge=-180,
-        le=180,
-        description='Longitude estatica para plataformas fixas',
-        examples=[-43.1729],
-    )
-    licenca_ibama: Optional[str] = Field(
-        default=None,
-        description='Número da licença IBAMA (ex: LO1572/2020)',
-        examples=['LO1572/2020'],
-    )
-    validade_licenca: Optional[str] = Field(
-        default=None,
-        description='Data de validade da licença (YYYY-MM-DD)',
-        examples=['2024-07-11'],
-    )
-    status_licenca: Optional[str] = Field(
-        default=None,
-        description='Status da licença (Renovação solicitada, Anuência, Ofício, etc)',
-        examples=['Renovação solicitada'],
-    )
-    observacao_licenca: Optional[str] = Field(
-        default=None,
-        description='Observações sobre a licença',
-        examples=['Aguardando manifestação do IBAMA'],
+        description="Observações adicionais sobre a unidade ou licenciamento",
+        examples=["Aguardando manifestação do IBAMA quanto à renovação da LO1572/2020"],
     )
 
-    @property
-    def is_mobile(self) -> bool:
-        return self.tipoUnidade in _MOBILE_TYPES
-
-    @property
-    def is_fixed(self) -> bool:
-        return self.tipoUnidade in _FIXED_TYPES
-
-    @field_validator('disponibilidadeInicio', 'disponibilidadeFim', mode='after')
+    @field_validator("disponibilidadeInicio", "disponibilidadeFim", mode="after")
     @classmethod
     def _ensure_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
         if value is not None and value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
 
-    @field_validator('licencasAutorizadas', mode='before')
+    @field_validator("licencasAutorizadas", mode="before")
     @classmethod
     def _validar_licencas(cls, value: Optional[List[str]]) -> List[str]:
         if value is None:
             return []
+        if not isinstance(value, list):
+            raise ValueError("licencasAutorizadas deve ser uma lista de strings")
         for licenca in value:
             if not isinstance(licenca, str) or not licenca.strip():
-                raise ValueError('Cada licenca autorizada deve ser uma string nao vazia')
+                raise ValueError("Cada licença autorizada deve ser uma string não vazia")
         return value
 
-    @model_validator(mode='after')
-    def _validar_periodo_e_posicao(self):
+    @model_validator(mode="after")
+    def _validar_periodo(self) -> "UnidadeMaritima":
         inicio = self.disponibilidadeInicio
         fim = self.disponibilidadeFim
         if inicio is not None and fim is not None and fim < inicio:
-            raise ValueError('disponibilidadeFim deve ser maior ou igual a disponibilidadeInicio')
-
-        if (self.latitude is not None) ^ (self.longitude is not None):
-            raise ValueError('Latitude e longitude devem ser informadas juntas')
-
+            raise ValueError(
+                "disponibilidadeFim deve ser maior ou igual a disponibilidadeInicio"
+            )
         return self
 
 
+# ---------------------------------------------------------------------------
+# PosicaoAIS
+# ---------------------------------------------------------------------------
 class PosicaoAIS(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mmsi": "710001720",
+                "latitude": -22.9068,
+                "longitude": -43.1729,
+                "timestampAquisicao": "2025-07-15T13:56:11Z",
+                "status": "UNDER WAY USING ENGINE",
+            }
+        }
+    )
+
     mmsi: str = Field(
         ...,
-        min_length=9,
-        max_length=9,
-        pattern=r'^\\d{9}$',
-        description='MMSI da embarcacao',
-        examples=['710001720'],
+        min_length=1,
+        description="MMSI da embarcação (string)",
+        examples=["710001720", "538003593"],
     )
     latitude: float = Field(
         ...,
-        ge=-90,
-        le=90,
-        description='Latitude em graus decimais',
+        ge=-90.0,
+        le=90.0,
+        description="Latitude em graus decimais",
         examples=[-22.9068],
     )
     longitude: float = Field(
         ...,
-        ge=-180,
-        le=180,
-        description='Longitude em graus decimais',
+        ge=-180.0,
+        le=180.0,
+        description="Longitude em graus decimais",
         examples=[-43.1729],
     )
     timestampAquisicao: datetime = Field(
         ...,
-        description='Data e hora da aquisicao da posicao (ISO 8601)',
-        examples=['2026-06-25T13:56:11+00:00'],
+        description="Data e hora da aquisição da posição no formato ISO 8601 com sufixo Z (UTC)",
+        examples=["2025-07-15T13:56:11Z"],
+    )
+    status: Optional[str] = Field(
+        default=None,
+        description="Status de navegação AIS da embarcação",
+        examples=["UNDER WAY USING ENGINE", "AT ANCHOR", "MOORED"],
     )
 
-    @field_validator('timestampAquisicao', mode='before')
+    @field_validator("timestampAquisicao", mode="before")
     @classmethod
     def _normalizar_timestamp(cls, value):
         if isinstance(value, str):
             value = value.strip()
-            if value.endswith('+00:00Z'):
+            if value.endswith("+00:00Z"):
                 value = value[:-1]
         return value
 
-    @field_validator('timestampAquisicao', mode='after')
+    @field_validator("timestampAquisicao", mode="after")
     @classmethod
     def _ensure_timezone_aquisicao(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Licenca
+# ---------------------------------------------------------------------------
+class Licenca(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "numero": "LO1572/2020",
+                "dataEmissao": "2020-07-11",
+                "dataValidade": "2024-07-11",
+                "tipo": "Licença de Operação (LO)",
+                "unidadeMaritima": {
+                    "nome": "P-65",
+                    "imo": None,
+                    "mmsi": "538003593",
+                    "tipoUnidade": "PLATAFORMA_FIXA",
+                    "licencasAutorizadas": ["LO1572/2020"],
+                    "disponibilidadeInicio": "2020-09-01T00:00:00Z",
+                    "disponibilidadeFim": "2029-09-01T00:00:00Z",
+                    "status": "ATIVA",
+                    "observacoes": "Renovação solicitada - Aguardando manifestação do IBAMA",
+                },
+            }
+        }
+    )
+
+    numero: str = Field(
+        ...,
+        min_length=1,
+        description="Número da licença emitida pelo IBAMA",
+        examples=["LO1572/2020"],
+    )
+    dataEmissao: Optional[datetime] = Field(
+        default=None,
+        description="Data de emissão da licença (ISO 8601)",
+        examples=["2020-07-11T00:00:00Z"],
+    )
+    dataValidade: Optional[datetime] = Field(
+        default=None,
+        description="Data de validade da licença (ISO 8601)",
+        examples=["2024-07-11T00:00:00Z"],
+    )
+    tipo: str = Field(
+        ...,
+        min_length=1,
+        description="Tipo da licença (LO, LPS, LI, LP, etc.)",
+        examples=["Licença de Operação (LO)"],
+    )
+    unidadeMaritima: Optional[UnidadeMaritima] = Field(
+        default=None,
+        description="Unidade marítima vinculada à licença",
+    )
+
+    @field_validator("dataEmissao", "dataValidade", mode="after")
+    @classmethod
+    def _ensure_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
+    @model_validator(mode="after")
+    def _validar_datas(self) -> "Licenca":
+        if (
+            self.dataEmissao is not None
+            and self.dataValidade is not None
+            and self.dataValidade < self.dataEmissao
+        ):
+            raise ValueError("dataValidade deve ser maior ou igual a dataEmissao")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# TokenResponse
+# ---------------------------------------------------------------------------
+class TokenResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJpYmFtYS1jbGllbnQiLCJleHAiOjE3MDAwMDAwMDB9.signature",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+        }
+    )
+
+    access_token: str = Field(
+        ...,
+        description="Token JWT de acesso para autenticação nos endpoints protegidos",
+        examples=[
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJpYmFtYS1jbGllbnQifQ.signature"
+        ],
+    )
+    token_type: str = Field(
+        default="Bearer",
+        description="Tipo do token retornado",
+        examples=["Bearer"],
+    )
+    expires_in: int = Field(
+        default=3600,
+        ge=1,
+        description="Tempo de expiração do token em segundos",
+        examples=[3600],
+    )
+
+
+# ---------------------------------------------------------------------------
+# ErrorResponse
+# ---------------------------------------------------------------------------
+class ErrorResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status_code": 404,
+                "detail": "Embarcação com MMSI 999999999 não encontrada",
+                "timestamp": "2025-07-15T13:56:11Z",
+            }
+        }
+    )
+
+    status_code: int = Field(
+        ...,
+        ge=100,
+        le=599,
+        description="Código HTTP do erro",
+        examples=[404],
+    )
+    detail: str = Field(
+        ...,
+        min_length=1,
+        description="Mensagem descritiva do erro",
+        examples=["Embarcação com MMSI 999999999 não encontrada"],
+    )
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Data e hora do erro no formato ISO 8601 com sufixo Z (UTC)",
+        examples=["2025-07-15T13:56:11Z"],
+    )
+
+    @field_validator("timestamp", mode="before")
+    @classmethod
+    def _normalizar_timestamp(cls, value):
+        if isinstance(value, str):
+            value = value.strip()
+            if value.endswith("+00:00Z"):
+                value = value[:-1]
+        return value
+
+    @field_validator("timestamp", mode="after")
+    @classmethod
+    def _ensure_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
