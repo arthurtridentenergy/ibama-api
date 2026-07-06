@@ -237,8 +237,70 @@ def _normalize_position(
     return position
 
 
-async def _call_spinergie_api(mmsi: str) -> Optional[Any]:
-    """Executa a chamada HTTP ao endpoint da Spinergie."""
+# MMSIs das embarcações rastreadas em tempo real -> nome canônico usado na
+# Spinergie. Usado apenas como fallback de consulta (ver _call_spinergie_api):
+# algumas integrações da Spinergie indexam a unidade pelo NOME e não pelo
+# MMSI, então se a consulta por MMSI não retornar dado, tentamos pelo nome.
+_LIVE_VESSEL_NAMES_BY_MMSI = {
+    "710002450": "MAERSK VENTURA",
+    "710001720": "MAERSK VEGA",
+}
+
+
+def _parse_spinergie_response(response: httpx.Response, identificador: str) -> Optional[Any]:
+    """Interpreta a resposta HTTP da Spinergie e loga detalhes em caso de erro."""
+    logger.debug(f"Spinergie respondeu {response.status_code} para {identificador}")
+
+    if response.status_code == 200:
+        data = response.json()
+        logger.debug(f"Resposta bruta da Spinergie para {identificador}: {data}")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        return None
+
+    if response.status_code == 401:
+        logger.error(
+            "Falha de autenticação na API Spinergie (401) para %s. "
+            "Verifique se SPINERGIE_API_KEY/SPINERGIE_API_TOKEN no Render "
+            "tem o valor REAL da Spinergie (não um valor gerado "
+            "automaticamente). Corpo da resposta: %s",
+            identificador,
+            response.text,
+        )
+    elif response.status_code == 403:
+        logger.error(
+            "Acesso negado à API Spinergie (403) para %s. Corpo da resposta: %s",
+            identificador,
+            response.text,
+        )
+    elif response.status_code == 404:
+        logger.warning(
+            "Embarcação não encontrada no Spinergie (404) para %s. Corpo da resposta: %s",
+            identificador,
+            response.text,
+        )
+    elif response.status_code >= 500:
+        logger.error(f"Erro no servidor Spinergie ({response.status_code}) para {identificador}")
+    else:
+        logger.error(
+            f"Resposta inesperada do Spinergie ({response.status_code}) para {identificador}: "
+            f"{response.text}"
+        )
+
+    return None
+
+
+async def _call_spinergie_api(mmsi: str, nome: Optional[str] = None) -> Optional[Any]:
+    """
+    Executa a chamada HTTP ao endpoint da Spinergie.
+
+    Tenta primeiro por MMSI (contrato original assumido para esta integração).
+    Se não houver retorno (404/vazio) e um nome de embarcação for informado,
+    tenta novamente consultando pelo nome (`name`), já que algumas unidades
+    podem não estar indexadas por MMSI na Spinergie.
+    """
     if not SPINERGIE_API_KEY:
         logger.error("Variável de ambiente SPINERGIE_API_KEY não configurada")
         return None
@@ -249,51 +311,23 @@ async def _call_spinergie_api(mmsi: str) -> Optional[Any]:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    params = {"mmsi": mmsi}
-
-    logger.info(f"Consultando Spinergie para MMSI {mmsi} - URL: {url}")
 
     async with httpx.AsyncClient(timeout=SPINERGIE_TIMEOUT_SECONDS) as client:
-        response = await client.get(url, headers=headers, params=params)
-        logger.debug(f"Spinergie respondeu {response.status_code} para MMSI {mmsi}")
+        logger.info(f"Consultando Spinergie por MMSI {mmsi} - URL: {url}")
+        response = await client.get(url, headers=headers, params={"mmsi": mmsi})
+        data = _parse_spinergie_response(response, f"MMSI {mmsi}")
+        if data:
+            return data
 
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"Resposta bruta da Spinergie para MMSI {mmsi}: {data}")
-            if isinstance(data, list):
+        if nome:
+            logger.info(
+                f"Consulta por MMSI {mmsi} sem retorno; tentando por nome "
+                f"'{nome}' na Spinergie - URL: {url}"
+            )
+            response = await client.get(url, headers=headers, params={"name": nome})
+            data = _parse_spinergie_response(response, f"nome '{nome}' (MMSI {mmsi})")
+            if data:
                 return data
-            if isinstance(data, dict):
-                return [data]
-            return None
-
-        if response.status_code == 401:
-            logger.error(
-                "Falha de autenticação na API Spinergie (401) para MMSI %s. "
-                "Verifique se SPINERGIE_API_KEY/SPINERGIE_API_TOKEN no Render "
-                "tem o valor REAL da Spinergie (não um valor gerado "
-                "automaticamente). Corpo da resposta: %s",
-                mmsi,
-                response.text,
-            )
-        elif response.status_code == 403:
-            logger.error(
-                "Acesso negado à API Spinergie (403) para MMSI %s. Corpo da resposta: %s",
-                mmsi,
-                response.text,
-            )
-        elif response.status_code == 404:
-            logger.warning(
-                "Embarcação não encontrada no Spinergie (404) para MMSI %s. Corpo da resposta: %s",
-                mmsi,
-                response.text,
-            )
-        elif response.status_code >= 500:
-            logger.error(f"Erro no servidor Spinergie ({response.status_code}) para MMSI {mmsi}")
-        else:
-            logger.error(
-                f"Resposta inesperada do Spinergie ({response.status_code}) para MMSI {mmsi}: "
-                f"{response.text}"
-            )
 
         return None
 
@@ -316,13 +350,14 @@ async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
 
     mmsi = mmsi.strip()
     unit = get_unit_by_mmsi(mmsi)
+    nome_embarcacao = _LIVE_VESSEL_NAMES_BY_MMSI.get(mmsi)
 
     if _is_cache_valid(mmsi):
         logger.debug(f"Retornando posição do cache para MMSI {mmsi}")
         return _position_cache[mmsi]["data"]
 
     try:
-        raw_data = await _call_spinergie_api(mmsi)
+        raw_data = await _call_spinergie_api(mmsi, nome=nome_embarcacao)
     except (asyncio.TimeoutError, httpx.TimeoutException):
         logger.error(f"Timeout ao consultar Spinergie para MMSI {mmsi}")
         raw_data = None
