@@ -26,3 +26,11 @@ services:
       # `render blueprint sync` sobrescreva o valor com algo em branco.
       - key: SPINERGIE_API_KEY
         sync: false
+      # Chave DEDICADA ao endpoint /sd/api/vessel/sfm-latest-locations
+      # (última posição das embarcações). Confirmado pela Spinergie que essa
+      # chave é diferente da chave geral acima (que cobre POIs e demais
+      # endpoints, mas NÃO tem permissão para posições de embarcações).
+      # Gere essa chave na aba "API Keys" do painel da Spinergie e cole o
+      # valor aqui no dashboard do Render (Environment).
+      - key: SPINERGIE_VESSEL_API_KEY
+        sync: false
