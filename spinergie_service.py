@@ -5,8 +5,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-from aiohttp import ClientTimeout
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -251,40 +250,39 @@ async def _call_spinergie_api(mmsi: str) -> Optional[Any]:
         "Content-Type": "application/json",
     }
     params = {"mmsi": mmsi}
-    timeout = ClientTimeout(total=SPINERGIE_TIMEOUT_SECONDS)
 
     logger.info(f"Consultando Spinergie para MMSI {mmsi} - URL: {url}")
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers, params=params) as response:
-            logger.debug(f"Spinergie respondeu {response.status} para MMSI {mmsi}")
+    async with httpx.AsyncClient(timeout=SPINERGIE_TIMEOUT_SECONDS) as client:
+        response = await client.get(url, headers=headers, params=params)
+        logger.debug(f"Spinergie respondeu {response.status_code} para MMSI {mmsi}")
 
-            if response.status == 200:
-                data = await response.json()
-                logger.debug(f"Resposta bruta da Spinergie para MMSI {mmsi}: {data}")
-                if isinstance(data, list):
-                    return data
-                if isinstance(data, dict):
-                    return [data]
-                return None
-
-            if response.status == 401:
-                logger.error(
-                    "Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY"
-                )
-            elif response.status == 403:
-                logger.error("Acesso negado à API Spinergie (403)")
-            elif response.status == 404:
-                logger.warning(f"Embarcação não encontrada no Spinergie (404) para MMSI {mmsi}")
-            elif response.status >= 500:
-                logger.error(f"Erro no servidor Spinergie ({response.status}) para MMSI {mmsi}")
-            else:
-                body = await response.text()
-                logger.error(
-                    f"Resposta inesperada do Spinergie ({response.status}) para MMSI {mmsi}: {body}"
-                )
-
+        if response.status_code == 200:
+            data = response.json()
+            logger.debug(f"Resposta bruta da Spinergie para MMSI {mmsi}: {data}")
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return [data]
             return None
+
+        if response.status_code == 401:
+            logger.error(
+                "Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY"
+            )
+        elif response.status_code == 403:
+            logger.error("Acesso negado à API Spinergie (403)")
+        elif response.status_code == 404:
+            logger.warning(f"Embarcação não encontrada no Spinergie (404) para MMSI {mmsi}")
+        elif response.status_code >= 500:
+            logger.error(f"Erro no servidor Spinergie ({response.status_code}) para MMSI {mmsi}")
+        else:
+            logger.error(
+                f"Resposta inesperada do Spinergie ({response.status_code}) para MMSI {mmsi}: "
+                f"{response.text}"
+            )
+
+        return None
 
 
 async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
@@ -312,19 +310,14 @@ async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
 
     try:
         raw_data = await _call_spinergie_api(mmsi)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, httpx.TimeoutException):
         logger.error(f"Timeout ao consultar Spinergie para MMSI {mmsi}")
         raw_data = None
-    except aiohttp.ClientConnectionError as exc:
+    except httpx.ConnectError as exc:
         logger.error(f"Erro de conexão com Spinergie para MMSI {mmsi}: {exc}")
         raw_data = None
-    except aiohttp.ClientResponseError as exc:
-        logger.error(
-            f"Erro na resposta do Spinergie para MMSI {mmsi}: {exc.status} - {exc.message}"
-        )
-        raw_data = None
-    except aiohttp.ClientError as exc:
-        logger.error(f"Erro do cliente HTTP ao consultar Spinergie para MMSI {mmsi}: {exc}")
+    except httpx.HTTPError as exc:
+        logger.error(f"Erro HTTP ao consultar Spinergie para MMSI {mmsi}: {exc}")
         raw_data = None
     except Exception as exc:
         logger.exception(f"Erro inesperado ao consultar Spinergie para MMSI {mmsi}: {exc}")

@@ -20,5 +20,9 @@ services:
         value: production
       - key: SPINERGIE_BASE_URL
         value: https://trident-energy-br.spinergie.com
+      # NÃO usar generateValue aqui — precisa ser a chave REAL fornecida pela
+      # Spinergie. Defina o valor manualmente no dashboard do Render
+      # (Environment) após o primeiro deploy; sync: false evita que um novo
+      # `render blueprint sync` sobrescreva o valor com algo em branco.
       - key: SPINERGIE_API_KEY
-        generateValue: true
+        sync: false
