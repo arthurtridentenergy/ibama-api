@@ -68,47 +68,75 @@ settings = Settings()
 
 # ---------------------------------------------------------------------------
 # Modelos de resposta
+#
+# UnidadeResponse e PosicaoResponse seguem ESTRITAMENTE os schemas oficiais
+# `UnidadeMaritima` (seção 1.4.1) e `PosicaoAIS` (seção 1.4.2) do Anexo técnico
+# do Ofício-Circular nº 4/2025/COEXP/CGMAC/DILIC — nenhum campo extra é
+# retornado nessas duas respostas.
 # ---------------------------------------------------------------------------
 class UnidadeResponse(BaseModel):
-    nome: str = Field(..., description="Nome da unidade marítima", examples=["P-65"])
-    mmsi: str = Field(..., description="MMSI ou identificador da unidade", examples=["538003593"])
-    imo: Optional[str] = Field(default=None, description="Número IMO", examples=["1234567"])
-    tipoUnidade: str = Field(..., description="Tipo da unidade", examples=["PLATAFORMA_FIXA"])
-    licencasAutorizadas: List[str] = Field(
-        default_factory=list, description="Licenças/autorizações vigentes"
+    """Schema `UnidadeMaritima` (seção 1.4.1 do Anexo IBAMA)."""
+
+    nome: str = Field(
+        ..., description="Nome comercial ou de operação da unidade", examples=["P-65"]
     )
-    disponibilidadeInicio: Optional[str] = Field(
-        default=None, description="Início de disponibilidade (ISO 8601 UTC)"
+    imo: Optional[str] = Field(
+        default=None,
+        description="Número IMO (7 dígitos). Nulo se não aplicável",
+        examples=["1234567"],
+    )
+    mmsi: str = Field(
+        ...,
+        description=(
+            "(Chave Principal) Número MMSI - Identidade do Serviço Móvel "
+            "Marítimo (9 dígitos)"
+        ),
+        examples=["538003593"],
+    )
+    tipoUnidade: str = Field(
+        ..., description="Categoria da unidade", examples=["UNIDADE_PRODUCAO"]
+    )
+    licencasAutorizadas: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Lista contendo os códigos das licenças ativas para operação das "
+            "atividades"
+        ),
+        examples=[["LO1572/2020"]],
+    )
+    disponibilidadeInicio: str = Field(
+        ...,
+        description="Data do início da disponibilidade de operação da unidade pela empresa",
+        examples=["2024-01-01T00:00:00Z"],
     )
     disponibilidadeFim: Optional[str] = Field(
-        default=None, description="Fim de disponibilidade (ISO 8601 UTC)"
+        default=None,
+        description=(
+            "Data do fim da disponibilidade de operação da unidade pela "
+            "empresa. Nulo se não tiver"
+        ),
+        examples=["2026-12-31T00:00:00Z"],
     )
-    latitude: Optional[float] = Field(
-        default=None, ge=-90, le=90, description="Latitude em graus decimais"
-    )
-    longitude: Optional[float] = Field(
-        default=None, ge=-180, le=180, description="Longitude em graus decimais"
-    )
-    licenca_ibama: Optional[str] = Field(default=None, description="Número da licença IBAMA")
-    validade_licenca: Optional[str] = Field(default=None, description="Validade da licença")
-    status_licenca: Optional[str] = Field(default=None, description="Status da licença")
-    observacao_licenca: Optional[str] = Field(default=None, description="Observações da licença")
 
 
 class PosicaoResponse(BaseModel):
-    identificador: str = Field(
-        ..., description="Identificador consultado (MMSI ou nome)", examples=["538003593"]
+    """Schema `PosicaoAIS` (seção 1.4.2 do Anexo IBAMA)."""
+
+    mmsi: str = Field(
+        ..., description="MMSI da unidade a qual a posição se refere", examples=["538003593"]
     )
-    mmsi: str = Field(..., description="MMSI da unidade", examples=["538003593"])
-    nome: Optional[str] = Field(default=None, description="Nome da unidade", examples=["P-65"])
-    latitude: float = Field(..., ge=-90, le=90, description="Latitude em graus decimais")
-    longitude: float = Field(..., ge=-180, le=180, description="Longitude em graus decimais")
+    latitude: float = Field(
+        ..., ge=-90, le=90, description="Coordenada de latitude em formato decimal",
+        examples=[-22.701833],
+    )
+    longitude: float = Field(
+        ..., ge=-180, le=180, description="Coordenada de longitude em formato decimal",
+        examples=[-40.677167],
+    )
     timestampAquisicao: str = Field(
-        ..., description="Timestamp ISO 8601 UTC", examples=["2024-01-15T10:30:00Z"]
-    )
-    tipoUnidade: Optional[str] = Field(default=None, description="Tipo da unidade")
-    fonte: str = Field(
-        default="data_local", description="Fonte dos dados de posição"
+        ...,
+        description="Data e hora exata do registro da coordenada pelo AIS (ISO 8601 UTC com Z)",
+        examples=["2024-01-15T10:30:00Z"],
     )
 
 
@@ -121,10 +149,14 @@ class TokenResponse(BaseModel):
 
 
 class ErroResponse(BaseModel):
-    error: str = Field(..., examples=["HTTPException"])
-    message: str = Field(..., examples=["Recurso não encontrado"])
-    request_id: Optional[str] = Field(default=None, examples=["uuid-1234"])
-    timestamp: str = Field(..., examples=["2024-01-15T10:30:00Z"])
+    """Formato de erro exigido pelo IBAMA (seção 1.6 do Anexo técnico)."""
+
+    error: str = Field(..., description="Código do erro", examples=["not_found"])
+    error_description: str = Field(
+        ...,
+        description="Uma descrição clara do que aconteceu.",
+        examples=["A unidade marítima com mmsi 'XXXXXXXXX' não foi encontrada."],
+    )
 
 
 class HealthResponse(BaseModel):
@@ -132,6 +164,24 @@ class HealthResponse(BaseModel):
     timestamp: str = Field(..., examples=["2024-01-15T10:30:00Z"])
     version: str = Field(..., examples=["1.0.0"])
     service: str = Field(..., examples=["api-ibama"])
+
+
+# ---------------------------------------------------------------------------
+# Mapeamento de status HTTP -> código de erro padronizado (seção 1.6)
+# ---------------------------------------------------------------------------
+_ERROR_CODES_BY_STATUS: Dict[int, str] = {
+    status.HTTP_400_BAD_REQUEST: "invalid_request",
+    status.HTTP_401_UNAUTHORIZED: "invalid_token",
+    status.HTTP_404_NOT_FOUND: "not_found",
+    status.HTTP_422_UNPROCESSABLE_ENTITY: "validation_error",
+    status.HTTP_429_TOO_MANY_REQUESTS: "rate_limit_exceeded",
+    status.HTTP_500_INTERNAL_SERVER_ERROR: "internal_server_error",
+}
+
+
+def _error_code_for_status(status_code: int) -> str:
+    """Mapeia um status HTTP para o código de erro padronizado do IBAMA."""
+    return _ERROR_CODES_BY_STATUS.get(status_code, "error")
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +232,11 @@ def _tipo_unidade_str(u: UnidadeMaritima) -> str:
 
 
 def to_unidade_response(u: UnidadeMaritima) -> UnidadeResponse:
-    """Converte UnidadeMaritima do models.py para UnidadeResponse."""
+    """
+    Converte UnidadeMaritima (modelo interno, com campos extras de uso próprio
+    da Trident) para UnidadeResponse — que expõe estritamente os 7 campos do
+    schema `UnidadeMaritima` do IBAMA.
+    """
     return UnidadeResponse(
         nome=u.nome,
         mmsi=u.mmsi,
@@ -191,12 +245,6 @@ def to_unidade_response(u: UnidadeMaritima) -> UnidadeResponse:
         licencasAutorizadas=u.licencasAutorizadas,
         disponibilidadeInicio=normalize_datetime(u.disponibilidadeInicio),
         disponibilidadeFim=normalize_datetime(u.disponibilidadeFim),
-        latitude=u.latitude,
-        longitude=u.longitude,
-        licenca_ibama=u.licenca_ibama,
-        validade_licenca=u.validade_licenca,
-        status_licenca=u.status_licenca,
-        observacao_licenca=u.observacao_licenca,
     )
 
 
@@ -292,9 +340,7 @@ async def rate_limit_guard(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
-                f"Limite de requisições excedido. "
-                f"Limite: {settings.RATE_LIMIT} requisições por "
-                f"{settings.RATE_LIMIT_WINDOW_SECONDS} segundos."
+                "Limite de requisições excedido. Tente novamente mais tarde."
             ),
         )
     request.state.rate_limit_remaining = remaining
@@ -319,6 +365,9 @@ app = FastAPI(
     description=(
         "API REST para consulta de unidades marítimas licenciadas pelo IBAMA "
         "e acompanhamento de posições de embarcações e plataformas.\n\n"
+        "As respostas de `GET /v1/unidades` e `GET /v1/posicao/{identificador}` "
+        "seguem estritamente os schemas `UnidadeMaritima` e `PosicaoAIS` do "
+        "Anexo técnico do Ofício-Circular nº 4/2025/COEXP/CGMAC/DILIC.\n\n"
         "**Autenticação:** OAuth 2.0 Client Credentials via `POST /auth/token`. "
         "Inclua o token no header `Authorization: Bearer <token>`."
     ),
@@ -382,15 +431,17 @@ async def request_middleware(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
-# Tratamento de erros padronizado
+# Tratamento de erros padronizado (seção 1.6 do Anexo IBAMA)
+#
+# Corpo: {"error": "codigo_do_erro", "error_description": "..."}
+# O X-Request-ID (útil para suporte/depuração) permanece apenas como header de
+# resposta (adicionado pelo middleware acima), nunca dentro do corpo JSON.
 # ---------------------------------------------------------------------------
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     content = ErroResponse(
-        error="HTTPException",
-        message=str(exc.detail),
-        request_id=getattr(request.state, "request_id", None),
-        timestamp=iso_timestamp(),
+        error=_error_code_for_status(exc.status_code),
+        error_description=str(exc.detail),
     ).model_dump()
     headers = dict(exc.headers) if exc.headers else {}
     return JSONResponse(
@@ -403,10 +454,11 @@ async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ):
     content = ErroResponse(
-        error="ValidationError",
-        message="Erro de validação nos dados de entrada. Verifique os parâmetros da requisição.",
-        request_id=getattr(request.state, "request_id", None),
-        timestamp=iso_timestamp(),
+        error=_error_code_for_status(status.HTTP_422_UNPROCESSABLE_ENTITY),
+        error_description=(
+            "Erro de validação nos dados de entrada. Verifique os parâmetros "
+            "da requisição."
+        ),
     ).model_dump()
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content=content
@@ -420,10 +472,8 @@ async def general_exception_handler(request: Request, exc: Exception):
         extra={"request_id": getattr(request.state, "request_id", None)},
     )
     content = ErroResponse(
-        error="InternalServerError",
-        message="Erro interno do servidor. Entre em contato com o suporte.",
-        request_id=getattr(request.state, "request_id", None),
-        timestamp=iso_timestamp(),
+        error=_error_code_for_status(status.HTTP_500_INTERNAL_SERVER_ERROR),
+        error_description="Ocorreu uma falha inesperada no servidor.",
     ).model_dump()
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=content
@@ -479,12 +529,17 @@ async def auth_token(
     tags=["Unidades"],
     dependencies=[Depends(rate_limit_guard)],
     summary="Listar todas as unidades marítimas licenciadas",
-    response_description="Lista de unidades marítimas com licenças IBAMA",
+    response_description="Lista de unidades marítimas (schema UnidadeMaritima do IBAMA)",
 )
 async def listar_unidades():
     """
-    Retorna todas as unidades marítimas cadastradas, incluindo plataformas fixas
-    e embarcações de apoio/emergência, com suas respectivas licenças e coordenadas.
+    Retorna todas as unidades marítimas cadastradas, incluindo unidades de
+    produção e embarcações de apoio/emergência.
+
+    A resposta segue estritamente o schema `UnidadeMaritima` (seção 1.4.1 do
+    Anexo técnico do IBAMA): nome, imo, mmsi, tipoUnidade, licencasAutorizadas,
+    disponibilidadeInicio e disponibilidadeFim. Dados de posição (latitude/
+    longitude) não fazem parte desta rota — use `GET /v1/posicao/{identificador}`.
     """
     vessels = get_all_vessels()
     logger.info(f"Listagem de unidades retornou {len(vessels)} registros")
@@ -497,33 +552,33 @@ async def listar_unidades():
     tags=["Posição"],
     dependencies=[Depends(rate_limit_guard)],
     summary="Consultar posição de unidade por MMSI ou nome",
-    response_description="Posição atual da unidade identificada",
+    response_description="Posição atual da unidade (schema PosicaoAIS do IBAMA)",
 )
 async def obter_posicao(identificador: str):
     """
-    Consulta a posição de uma unidade marítima aceitando:
+    Consulta a posição mais recente de uma unidade marítima aceitando:
 
     - **MMSI numérico** (ex: `538003593`)
-    - **MMSI alfanumérico** (ex: `PPM-1`)
+    - **MMSI alfanumérico** (ex: `PPM-1`, `PCE-1` — exceção expressamente
+      autorizada pelo IBAMA para unidades sem AIS/MMSI numérico próprio)
     - **Nome da unidade** (ex: `P-65`)
 
-    A busca é feita em ordem:
-    1. Posição direta pelo identificador informado (MMSI numérico ou alfanumérico)
-    2. Busca por nome da unidade e posterior busca de posição pelo MMSI encontrado
-    3. Coordenadas fixas cadastradas (para plataformas sem posição AIS dinâmica)
+    A resposta segue estritamente o schema `PosicaoAIS` (seção 1.4.2 do Anexo
+    técnico do IBAMA): mmsi, latitude, longitude e timestampAquisicao.
 
-    **Fonte dos dados:**
-    - Plataformas (P-65, P-08, PPM-1, PCE-1): coordenadas fixas (hardcoded).
+    **Fonte dos dados (uso interno, não aparece na resposta):**
+    - Unidades de produção (P-65, P-08, PPM-1, PCE-1): coordenadas fixas
+      (hardcoded).
     - Embarcações Maersk Ventura e Maersk Vega: posição em **tempo real**,
-      consultada a cada requisição na API Spinergie. Em caso de falha da API,
-      a resposta cai para a última coordenada fixa cadastrada
-      (`fonte: "coordenada_fixa_fallback"`).
+      consultada a cada requisição na API Spinergie, com fallback para a
+      última coordenada fixa cadastrada caso a API falhe.
     """
     ident = identificador.strip()
 
-    # 1. Tentar buscar posição diretamente pelo identificador (MMSI numérico ou alfanumérico)
-    #    Para Maersk Ventura e Maersk Vega, isso aciona uma consulta em tempo real
-    #    à API Spinergie; para as plataformas, a coordenada é sempre hardcoded.
+    # 1. Tentar buscar posição diretamente pelo identificador (MMSI numérico ou
+    #    alfanumérico). Para Maersk Ventura e Maersk Vega, isso aciona uma
+    #    consulta em tempo real à API Spinergie; para as demais unidades, a
+    #    coordenada é sempre hardcoded.
     pos = await get_vessel_position(ident)
     vessel = buscar_vessel_por_mmsi(ident)
 
@@ -534,55 +589,35 @@ async def obter_posicao(identificador: str):
             vessel = vessel_by_name
             pos = await get_vessel_position(vessel.mmsi)
 
-    # 3. Se encontrou a unidade mas não a posição dinâmica, usar coordenadas fixas
+    # 3. Se encontrou a unidade mas não a posição dinâmica, usar coordenada
+    #    fixa cadastrada diretamente na unidade (fallback de última instância)
     if pos is None and vessel and vessel.latitude is not None and vessel.longitude is not None:
-        logger.info(
-            f"Posição construída a partir de coordenadas fixas para: {ident}"
-        )
+        logger.info(f"Posição construída a partir de coordenadas fixas para: {ident}")
         return PosicaoResponse(
-            identificador=ident,
             mmsi=vessel.mmsi,
-            nome=vessel.nome,
             latitude=vessel.latitude,
             longitude=vessel.longitude,
             timestampAquisicao=iso_timestamp(),
-            tipoUnidade=_tipo_unidade_str(vessel),
-            fonte="coordenada_fixa",
         )
 
     # 4. Se encontrou posição (direta ou via nome)
     if pos is not None:
-        tipo = None
-        nome = None
-        if vessel:
-            tipo = _tipo_unidade_str(vessel)
-            nome = vessel.nome
-        else:
-            v = buscar_vessel_por_mmsi(pos.mmsi)
-            if v:
-                tipo = _tipo_unidade_str(v)
-                nome = v.nome
-
         ts = normalize_datetime(pos.timestampAquisicao) or iso_timestamp()
         logger.info(
             f"Posição encontrada para identificador: {ident} (MMSI: {pos.mmsi}, "
             f"fonte: {pos.fonte or 'data_local'})"
         )
         return PosicaoResponse(
-            identificador=ident,
             mmsi=pos.mmsi,
-            nome=nome,
             latitude=pos.latitude,
             longitude=pos.longitude,
             timestampAquisicao=ts,
-            tipoUnidade=tipo,
-            fonte=pos.fonte or "data_local",
         )
 
     # 5. Nenhuma unidade ou posição encontrada
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Unidade não encontrada para o identificador: {ident}",
+        detail=f"A unidade marítima com mmsi '{ident}' não foi encontrada.",
     )
 
 

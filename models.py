@@ -13,14 +13,21 @@ from pydantic import BaseModel, Field, field_serializer, field_validator, model_
 # Enums
 # ---------------------------------------------------------------------------
 class TipoUnidade(str, Enum):
-    """Tipos de unidade marítima reconhecidos pela API IBAMA."""
+    """
+    Tipos de unidade marítima reconhecidos pela API IBAMA.
+
+    Valores exatamente conforme a seção 1.4.3 do Anexo técnico do
+    Ofício-Circular nº 4/2025/COEXP/CGMAC/DILIC. Nenhum outro valor é aceito.
+    """
 
     EMBARCACAO_EMERGENCIA = 'EMBARCACAO_EMERGENCIA'
     EMBARCACAO_APOIO = 'EMBARCACAO_APOIO'
-    EMBARCACAO_MONITORAMENTO = 'EMBARCACAO_MONITORAMENTO'
+    EMBARCACAO_EMERGENCIA_APOIO = 'EMBARCACAO_EMERGENCIA_APOIO'
     UNIDADE_PRODUCAO = 'UNIDADE_PRODUCAO'
-    PLATAFORMA_FIXA = 'PLATAFORMA_FIXA'
-    PLATAFORMA_MOVEL = 'PLATAFORMA_MOVEL'
+    UNIDADE_PERFURACAO = 'UNIDADE_PERFURACAO'
+    NAVIO_SISMICO = 'NAVIO_SISMICO'
+    NAVIO_ALIVIADOR = 'NAVIO_ALIVIADOR'
+    FLOTEL = 'FLOTEL'
 
 
 class StatusLicenca(str, Enum):
@@ -36,17 +43,21 @@ class StatusLicenca(str, Enum):
     EM_ANALISE = 'Em análise'
 
 
+# Classificação auxiliar (uso interno, não faz parte do schema do IBAMA).
+# UNIDADE_PRODUCAO/UNIDADE_PERFURACAO podem ser fixas OU flutuantes conforme a
+# descrição oficial ("fixas ou móveis"), por isso não entram em nenhum dos dois
+# grupos abaixo — is_mobile/is_fixed só classificam os tipos que são
+# inequivocamente embarcações ou unidades fixas.
 _MOBILE_TYPES = {
     TipoUnidade.EMBARCACAO_EMERGENCIA,
     TipoUnidade.EMBARCACAO_APOIO,
-    TipoUnidade.EMBARCACAO_MONITORAMENTO,
-    TipoUnidade.PLATAFORMA_MOVEL,
+    TipoUnidade.EMBARCACAO_EMERGENCIA_APOIO,
+    TipoUnidade.NAVIO_SISMICO,
+    TipoUnidade.NAVIO_ALIVIADOR,
+    TipoUnidade.FLOTEL,
 }
 
-_FIXED_TYPES = {
-    TipoUnidade.UNIDADE_PRODUCAO,
-    TipoUnidade.PLATAFORMA_FIXA,
-}
+_FIXED_TYPES: set = set()
 
 # Padrões de MMSI:
 # - Numérico: exatamente 9 dígitos (ex.: 710001720, 538001903)
@@ -126,8 +137,8 @@ class UnidadeMaritima(BaseModel):
     )
     tipoUnidade: TipoUnidade = Field(
         ...,
-        description='Tipo da unidade (embarcação móvel ou plataforma fixa)',
-        examples=['EMBARCACAO_EMERGENCIA', 'PLATAFORMA_FIXA'],
+        description='Categoria da unidade (um dos 8 valores oficiais do IBAMA)',
+        examples=['EMBARCACAO_EMERGENCIA', 'UNIDADE_PRODUCAO'],
     )
     licencasAutorizadas: List[str] = Field(
         default_factory=list,
@@ -144,40 +155,46 @@ class UnidadeMaritima(BaseModel):
         description='Fim do período de disponibilidade (ISO 8601 UTC)',
         examples=['2026-12-31T00:00:00Z'],
     )
+    # Uso interno/Trident apenas: o schema oficial `UnidadeMaritima` do IBAMA
+    # (seção 1.4.1) NÃO inclui latitude/longitude — a posição é servida à parte
+    # pelo schema `PosicaoAIS` via GET /v1/posicao/{identificador}. Estes dois
+    # campos nunca são expostos na resposta de GET /v1/unidades.
     latitude: Optional[float] = Field(
         default=None,
         ge=-90,
         le=90,
-        description='Latitude estática para plataformas fixas',
+        description='[Uso interno] Latitude estática — não faz parte do schema oficial do IBAMA',
         examples=[-22.9068],
     )
     longitude: Optional[float] = Field(
         default=None,
         ge=-180,
         le=180,
-        description='Longitude estática para plataformas fixas',
+        description='[Uso interno] Longitude estática — não faz parte do schema oficial do IBAMA',
         examples=[-43.1729],
     )
 
-    # Campos IBAMA completos
+    # Campos de acompanhamento interno da Trident (não fazem parte do schema
+    # `UnidadeMaritima` oficial do IBAMA — usados apenas para controle próprio
+    # e nunca expostos na resposta de GET /v1/unidades).
     licenca_ibama: Optional[str] = Field(
         default=None,
-        description='Número da licença IBAMA (ex.: LO1572/2020)',
+        description='[Uso interno] Número da licença IBAMA (ex.: LO1572/2020)',
         examples=['LO1572/2020'],
     )
     validade_licenca: Optional[str] = Field(
         default=None,
-        description='Data de validade da licença no formato YYYY-MM-DD',
+        description='[Uso interno] Data de validade da licença no formato YYYY-MM-DD',
         examples=['2024-07-11'],
     )
     status_licenca: Optional[StatusLicenca] = Field(
         default=None,
-        description='Status da licença IBAMA',
+        description='[Uso interno] Status da licença IBAMA',
         examples=['Renovação solicitada', 'Anuência', 'Ofício'],
     )
     observacao_licenca: Optional[str] = Field(
         default=None,
-        description='Observações sobre a licença',
+        description='[Uso interno] Observações sobre a licença',
         examples=['Aguardando manifestação do IBAMA'],
     )
 
@@ -413,21 +430,21 @@ class PosicaoAIS(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Modelos auxiliares de resposta
+#
+# Observação: main.py define sua PRÓPRIA cópia de ErroResponse/TokenResponse/
+# HealthResponse (é o que a API de fato usa). As classes abaixo não são
+# importadas por main.py; mantidas aqui só por compatibilidade e já
+# atualizadas para o formato exigido pelo IBAMA (seção 1.6) para não ficarem
+# desatualizadas/confusas.
 # ---------------------------------------------------------------------------
 class ErroResponse(BaseModel):
-    """Modelo padronizado de resposta de erro."""
+    """Formato de erro exigido pelo IBAMA (seção 1.6 do Anexo técnico)."""
 
-    error: str = Field(..., description='Tipo do erro', examples=['HTTPException'])
-    message: str = Field(
-        ..., description='Mensagem descritiva do erro', examples=['Recurso não encontrado']
-    )
-    request_id: Optional[str] = Field(
-        default=None, description='Identificador da requisição', examples=['uuid-1234']
-    )
-    timestamp: str = Field(
+    error: str = Field(..., description='Código do erro', examples=['not_found'])
+    error_description: str = Field(
         ...,
-        description='Timestamp ISO 8601 UTC com Z',
-        examples=['2024-01-15T10:30:00Z'],
+        description='Uma descrição clara do que aconteceu.',
+        examples=["A unidade marítima com mmsi 'XXXXXXXXX' não foi encontrada."],
     )
 
 

@@ -39,7 +39,7 @@ _VESSELS: List[UnidadeMaritima] = [
         nome="P-65",
         imo=None,
         mmsi="538003593",
-        tipoUnidade="PLATAFORMA_FIXA",
+        tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2020-09-01T00:00:00Z",
         disponibilidadeFim="2029-09-01T00:00:00Z",
@@ -54,7 +54,7 @@ _VESSELS: List[UnidadeMaritima] = [
         nome="P-08",
         imo=None,
         mmsi="538001903",
-        tipoUnidade="PLATAFORMA_FIXA",
+        tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2021-03-15T00:00:00Z",
         disponibilidadeFim="2028-03-15T00:00:00Z",
@@ -65,11 +65,13 @@ _VESSELS: List[UnidadeMaritima] = [
         status_licenca="Renovação solicitada",
         observacao_licenca="Aguardando manifestação do IBAMA",
     ),
+    # MMSI "PPM-1": exceção alfanumérica expressamente autorizada pelo IBAMA
+    # (CGMAC) para unidades sem AIS/MMSI numérico próprio.
     UnidadeMaritima(
         nome="PPM-1",
         imo=None,
         mmsi="PPM-1",
-        tipoUnidade="PLATAFORMA_FIXA",
+        tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2023-01-01T00:00:00Z",
         disponibilidadeFim="2027-12-31T00:00:00Z",
@@ -80,11 +82,12 @@ _VESSELS: List[UnidadeMaritima] = [
         status_licenca="Renovação solicitada",
         observacao_licenca="Aguardando manifestação do IBAMA",
     ),
+    # MMSI "PCE-1": mesma exceção alfanumérica autorizada pelo IBAMA (ver PPM-1 acima).
     UnidadeMaritima(
         nome="PCE-1",
         imo=None,
         mmsi="PCE-1",
-        tipoUnidade="PLATAFORMA_FIXA",
+        tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2022-06-01T00:00:00Z",
         disponibilidadeFim="2027-06-01T00:00:00Z",
@@ -96,9 +99,11 @@ _VESSELS: List[UnidadeMaritima] = [
         observacao_licenca="Aguardando manifestação do IBAMA",
     ),
     # --- Embarcações de Apoio ---
+    # IMO 9294094 confirmado via cruzamento de MMSI no VesselFinder (verificar
+    # novamente contra Equasis/MarineTraffic antes do envio final ao IBAMA).
     UnidadeMaritima(
         nome="MAERSK VENTURA",
-        imo=None,
+        imo="9294094",
         mmsi="710002450",
         tipoUnidade="EMBARCACAO_APOIO",
         licencasAutorizadas=["LO1572/2020"],
