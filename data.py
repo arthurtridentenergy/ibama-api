@@ -37,7 +37,7 @@ _VESSELS: List[UnidadeMaritima] = [
     # --- Plataformas Fixas ---
     UnidadeMaritima(
         nome="P-65",
-        imo=None,
+        imo="8755039",
         mmsi="538003593",
         tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
@@ -52,7 +52,7 @@ _VESSELS: List[UnidadeMaritima] = [
     ),
     UnidadeMaritima(
         nome="P-08",
-        imo=None,
+        imo="8758017",
         mmsi="538001903",
         tipoUnidade="UNIDADE_PRODUCAO",
         licencasAutorizadas=["LO1572/2020"],
