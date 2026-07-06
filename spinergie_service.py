@@ -268,12 +268,25 @@ async def _call_spinergie_api(mmsi: str) -> Optional[Any]:
 
         if response.status_code == 401:
             logger.error(
-                "Falha de autenticação na API Spinergie (401). Verifique SPINERGIE_API_KEY"
+                "Falha de autenticação na API Spinergie (401) para MMSI %s. "
+                "Verifique se SPINERGIE_API_KEY/SPINERGIE_API_TOKEN no Render "
+                "tem o valor REAL da Spinergie (não um valor gerado "
+                "automaticamente). Corpo da resposta: %s",
+                mmsi,
+                response.text,
             )
         elif response.status_code == 403:
-            logger.error("Acesso negado à API Spinergie (403)")
+            logger.error(
+                "Acesso negado à API Spinergie (403) para MMSI %s. Corpo da resposta: %s",
+                mmsi,
+                response.text,
+            )
         elif response.status_code == 404:
-            logger.warning(f"Embarcação não encontrada no Spinergie (404) para MMSI {mmsi}")
+            logger.warning(
+                "Embarcação não encontrada no Spinergie (404) para MMSI %s. Corpo da resposta: %s",
+                mmsi,
+                response.text,
+            )
         elif response.status_code >= 500:
             logger.error(f"Erro no servidor Spinergie ({response.status_code}) para MMSI {mmsi}")
         else:
