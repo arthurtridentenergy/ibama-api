@@ -14,12 +14,25 @@ SPINERGIE_BASE_URL = os.getenv("SPINERGIE_BASE_URL", "https://api.spinergie.com"
 # SPINERGIE_API_TOKEN (nome usado no .env local) para evitar quebra por
 # divergência de nomenclatura entre ambientes.
 SPINERGIE_API_KEY = os.getenv("SPINERGIE_API_KEY") or os.getenv("SPINERGIE_API_TOKEN")
+# A Spinergie confirmou que a chave usada para o endpoint de última posição
+# de embarcações (/sd/api/vessel/sfm-latest-locations) é uma chave DEDICADA,
+# diferente da chave "geral" (usada para POIs e demais endpoints). Se
+# SPINERGIE_VESSEL_API_KEY não estiver configurada, cai para a chave geral
+# como melhor esforço — mas isso provavelmente resultará em 401/403, já que
+# a chave geral não tem permissão para este endpoint específico.
+SPINERGIE_VESSEL_API_KEY = os.getenv("SPINERGIE_VESSEL_API_KEY") or SPINERGIE_API_KEY
 SPINERGIE_TIMEOUT_SECONDS = int(os.getenv("SPINERGIE_TIMEOUT", "15"))
 
 CACHE_TTL = timedelta(minutes=5)
 DISCREPANCY_THRESHOLD_KM = 3.0
 
 _position_cache: Dict[str, Dict[str, Any]] = {}
+# Cache da lista completa retornada por /sd/api/vessel/sfm-latest-locations.
+# O endpoint não aceita filtro por mmsi/nome na requisição — sempre retorna
+# TODAS as embarcações rastreadas nos projetos acessíveis pela chave, e o
+# filtro pelo MMSI desejado é feito localmente. Cachear a lista evita uma
+# chamada HTTP separada para cada embarcação rastreada (Vega e Ventura).
+_vessel_list_cache: Dict[str, Any] = {"data": None, "timestamp": None}
 
 
 # Mapeamento de nomes internos para nomes canônicos utilizados pela API Spinergie.
@@ -193,7 +206,13 @@ def _normalize_position(
 
     mmsi = str(raw.get("mmsi") or fallback_mmsi)
 
-    vessel_name = raw.get("vesselName") or raw.get("nome") or raw.get("name")
+    # Campo oficial de nome no endpoint /sd/api/vessel/sfm-latest-locations é
+    # "vesselTitle" (ex.: "PACIFIC CONSTRUCTOR"). Mantemos os nomes antigos
+    # (vesselName/nome/name) apenas como compatibilidade, caso a resposta
+    # mude no futuro.
+    vessel_name = (
+        raw.get("vesselTitle") or raw.get("vesselName") or raw.get("nome") or raw.get("name")
+    )
     if vessel_name:
         nome = normalize_platform_name(vessel_name)
     elif unit:
@@ -216,9 +235,28 @@ def _normalize_position(
         logger.warning(f"Coordenadas ausentes para MMSI {mmsi}")
         return None
 
-    timestamp = raw.get("timestamp") or raw.get("timestampAquisicao") or raw.get("lastReceived")
+    # Campo oficial de data/hora é "datetime": timestamp UNIX em
+    # milissegundos (ex.: 1673270802000). Convertemos para ISO 8601 UTC no
+    # formato usado pelo schema PosicaoAIS ("...Z"). Mantemos os nomes
+    # antigos (timestamp/timestampAquisicao/lastReceived) como fallback.
+    raw_datetime_ms = raw.get("datetime")
+    timestamp = None
+    if raw_datetime_ms is not None:
+        try:
+            timestamp = (
+                datetime.fromtimestamp(int(raw_datetime_ms) / 1000, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "")
+                + "Z"
+            )
+        except (TypeError, ValueError, OSError, OverflowError) as exc:
+            logger.warning(f"Campo 'datetime' inválido para MMSI {mmsi}: {exc}")
+            timestamp = None
+
     if not timestamp:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = raw.get("timestamp") or raw.get("timestampAquisicao") or raw.get("lastReceived")
+    if not timestamp:
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "") + "Z"
 
     if unit:
         _check_coordinate_discrepancy(mmsi, latitude, longitude, unit)
@@ -235,16 +273,6 @@ def _normalize_position(
 
     logger.debug(f"Posição normalizada para MMSI {mmsi}: {position}")
     return position
-
-
-# MMSIs das embarcações rastreadas em tempo real -> nome canônico usado na
-# Spinergie. Usado apenas como fallback de consulta (ver _call_spinergie_api):
-# algumas integrações da Spinergie indexam a unidade pelo NOME e não pelo
-# MMSI, então se a consulta por MMSI não retornar dado, tentamos pelo nome.
-_LIVE_VESSEL_NAMES_BY_MMSI = {
-    "710002450": "MAERSK VENTURA",
-    "710001720": "MAERSK VEGA",
-}
 
 
 def _parse_spinergie_response(response: httpx.Response, identificador: str) -> Optional[Any]:
@@ -292,56 +320,88 @@ def _parse_spinergie_response(response: httpx.Response, identificador: str) -> O
     return None
 
 
-async def _call_spinergie_api(mmsi: str, nome: Optional[str] = None) -> Optional[Any]:
+async def _call_spinergie_api() -> Optional[List[Dict[str, Any]]]:
     """
-    Executa a chamada HTTP ao endpoint da Spinergie.
-
-    Tenta primeiro por MMSI (contrato original assumido para esta integração).
-    Se não houver retorno (404/vazio) e um nome de embarcação for informado,
-    tenta novamente consultando pelo nome (`name`), já que algumas unidades
-    podem não estar indexadas por MMSI na Spinergie.
+    Executa a chamada HTTP ao endpoint oficial da Spinergie
+    GET /sd/api/vessel/sfm-latest-locations (confirmado via documentação
+    oficial). Este endpoint NÃO aceita filtro por mmsi/nome na query string —
+    ele sempre retorna a última posição de TODAS as embarcações rastreadas
+    nos projetos acessíveis pela API key. O filtro pelo MMSI desejado deve
+    ser feito localmente sobre a lista retornada (ver fetch_vessel_position_async).
     """
-    if not SPINERGIE_API_KEY:
-        logger.error("Variável de ambiente SPINERGIE_API_KEY não configurada")
+    if not SPINERGIE_VESSEL_API_KEY:
+        logger.error(
+            "Nenhuma API key configurada para o endpoint de última posição de "
+            "embarcações (SPINERGIE_VESSEL_API_KEY/SPINERGIE_API_KEY/"
+            "SPINERGIE_API_TOKEN)."
+        )
         return None
 
     url = f"{SPINERGIE_BASE_URL}/sd/api/vessel/sfm-latest-locations"
+    # Conforme a documentação oficial da Spinergie (aba "API documentation"
+    # do painel), a autenticação é feita através do header "apiKey" contendo
+    # o valor da chave diretamente — NÃO no formato
+    # "Authorization: ApiKey <chave>" usado anteriormente aqui.
     headers = {
-        "Authorization": f"ApiKey {SPINERGIE_API_KEY}",
+        "apiKey": SPINERGIE_VESSEL_API_KEY,
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
 
+    logger.info(f"Consultando última posição de todas as embarcações na Spinergie - URL: {url}")
     async with httpx.AsyncClient(timeout=SPINERGIE_TIMEOUT_SECONDS) as client:
-        logger.info(f"Consultando Spinergie por MMSI {mmsi} - URL: {url}")
-        response = await client.get(url, headers=headers, params={"mmsi": mmsi})
-        data = _parse_spinergie_response(response, f"MMSI {mmsi}")
-        if data:
-            return data
+        response = await client.get(url, headers=headers)
+        return _parse_spinergie_response(response, "lista de últimas posições de embarcações")
 
-        if nome:
-            logger.info(
-                f"Consulta por MMSI {mmsi} sem retorno; tentando por nome "
-                f"'{nome}' na Spinergie - URL: {url}"
-            )
-            response = await client.get(url, headers=headers, params={"name": nome})
-            data = _parse_spinergie_response(response, f"nome '{nome}' (MMSI {mmsi})")
-            if data:
-                return data
 
-        return None
+async def _fetch_all_vessel_positions() -> Optional[List[Dict[str, Any]]]:
+    """Retorna a lista completa de últimas posições, usando cache de 5 minutos."""
+    cached_data = _vessel_list_cache.get("data")
+    cached_at = _vessel_list_cache.get("timestamp")
+    if cached_data is not None and cached_at and datetime.now(timezone.utc) - cached_at < CACHE_TTL:
+        logger.debug("Retornando lista de posições de embarcações do cache")
+        return cached_data
+
+    try:
+        data = await _call_spinergie_api()
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        logger.error("Timeout ao consultar lista de posições na Spinergie")
+        data = None
+    except httpx.ConnectError as exc:
+        logger.error(f"Erro de conexão com Spinergie: {exc}")
+        data = None
+    except httpx.HTTPError as exc:
+        logger.error(f"Erro HTTP ao consultar Spinergie: {exc}")
+        data = None
+    except Exception as exc:
+        logger.exception(f"Erro inesperado ao consultar Spinergie: {exc}")
+        data = None
+
+    if data is not None:
+        _vessel_list_cache["data"] = data
+        _vessel_list_cache["timestamp"] = datetime.now(timezone.utc)
+
+    return data
 
 
 async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
     """
     Busca a posição em tempo real de uma embarcação ou plataforma no Spinergie.
 
+    O endpoint oficial (/sd/api/vessel/sfm-latest-locations) retorna a última
+    posição de TODAS as embarcações rastreadas de uma vez só (sem filtro por
+    mmsi/nome na requisição); aqui buscamos essa lista (cacheada por 5 min) e
+    filtramos localmente pelo MMSI desejado.
+
     Para plataformas fixas, mantém cache local de 5 minutos e utiliza coordenadas
     cadastradas como fallback quando a API estiver indisponível. Também detecta e
     loga discrepâncias superiores a 3 km entre a posição da API e a coordenada fixa.
     """
-    if not SPINERGIE_API_KEY:
-        logger.error("Variável de ambiente SPINERGIE_API_KEY não configurada")
+    if not SPINERGIE_VESSEL_API_KEY:
+        logger.error(
+            "Nenhuma API key configurada para consultar posição de embarcações "
+            "(SPINERGIE_VESSEL_API_KEY/SPINERGIE_API_KEY/SPINERGIE_API_TOKEN)."
+        )
         return None
 
     if not mmsi or not mmsi.strip():
@@ -350,30 +410,26 @@ async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
 
     mmsi = mmsi.strip()
     unit = get_unit_by_mmsi(mmsi)
-    nome_embarcacao = _LIVE_VESSEL_NAMES_BY_MMSI.get(mmsi)
 
     if _is_cache_valid(mmsi):
         logger.debug(f"Retornando posição do cache para MMSI {mmsi}")
         return _position_cache[mmsi]["data"]
 
-    try:
-        raw_data = await _call_spinergie_api(mmsi, nome=nome_embarcacao)
-    except (asyncio.TimeoutError, httpx.TimeoutException):
-        logger.error(f"Timeout ao consultar Spinergie para MMSI {mmsi}")
-        raw_data = None
-    except httpx.ConnectError as exc:
-        logger.error(f"Erro de conexão com Spinergie para MMSI {mmsi}: {exc}")
-        raw_data = None
-    except httpx.HTTPError as exc:
-        logger.error(f"Erro HTTP ao consultar Spinergie para MMSI {mmsi}: {exc}")
-        raw_data = None
-    except Exception as exc:
-        logger.exception(f"Erro inesperado ao consultar Spinergie para MMSI {mmsi}: {exc}")
-        raw_data = None
+    all_vessels = await _fetch_all_vessel_positions()
 
     position = None
-    if raw_data and isinstance(raw_data, list) and raw_data:
-        position = _normalize_position(raw_data[0], mmsi, unit)
+    if all_vessels:
+        raw_match = next(
+            (v for v in all_vessels if str(v.get("mmsi") or "").strip() == mmsi),
+            None,
+        )
+        if raw_match:
+            position = _normalize_position(raw_match, mmsi, unit)
+        else:
+            logger.warning(
+                f"MMSI {mmsi} não encontrado na lista de {len(all_vessels)} "
+                f"embarcações retornadas pela Spinergie."
+            )
 
     if position:
         _position_cache[mmsi] = {
