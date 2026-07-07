@@ -296,6 +296,30 @@ def _parse_spinergie_response(response: httpx.Response, identificador: str) -> O
             logger.info(
                 f"Spinergie retornou {len(data)} embarcação(ões) para {identificador}: {resumo}"
             )
+            # 25 é um número "redondo" suspeito de limite de paginação
+            # (page size padrão). Logamos os headers de resposta relevantes
+            # para checar se há indício de paginação (total real maior que o
+            # retornado) que estaria cortando embarcações da lista.
+            headers_relevantes = {
+                k: v
+                for k, v in response.headers.items()
+                if any(
+                    termo in k.lower()
+                    for termo in ("total", "page", "limit", "offset", "count", "link")
+                )
+            }
+            if headers_relevantes:
+                logger.info(
+                    f"Headers de paginação/contagem na resposta da Spinergie para "
+                    f"{identificador}: {headers_relevantes}"
+                )
+            elif len(data) in (10, 20, 25, 50, 100):
+                logger.info(
+                    f"Atenção: {identificador} retornou exatamente {len(data)} "
+                    f"itens (número redondo, possível limite de paginação padrão "
+                    f"da Spinergie) e nenhum header de paginação foi encontrado "
+                    f"na resposta para confirmar isso."
+                )
             return data
         if isinstance(data, dict):
             logger.info(
