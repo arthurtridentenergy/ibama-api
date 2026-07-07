@@ -106,6 +106,26 @@ def get_unit_by_name(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _mmsi_to_str(value: Any) -> str:
+    """
+    Normaliza um valor de MMSI vindo da Spinergie para string.
+
+    CAUSA RAIZ CONFIRMADA: o endpoint /sd/api/vessel/sfm-latest-locations
+    retorna o campo "mmsi" como número de ponto flutuante (ex.: 710001720.0,
+    não 710001720 nem "710001720"). Um simples str(710001720.0) resulta em
+    "710001720.0", que nunca bate com o MMSI "710001720" usado no resto do
+    projeto — por isso Maersk Vega/Ventura nunca eram encontradas na lista,
+    mesmo estando presentes nela. Esta função remove o ".0" nesses casos.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    return str(value).strip()
+
+
 def _haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calcula a distância em quilômetros entre dois pontos geográficos."""
     earth_radius_km = 6371.0
@@ -204,7 +224,7 @@ def _normalize_position(
         logger.warning(f"Resposta inválida ou vazia da Spinergie para MMSI {fallback_mmsi}")
         return None
 
-    mmsi = str(raw.get("mmsi") or fallback_mmsi)
+    mmsi = _mmsi_to_str(raw.get("mmsi")) or fallback_mmsi
 
     # Campo oficial de nome no endpoint /sd/api/vessel/sfm-latest-locations é
     # "vesselTitle" (ex.: "PACIFIC CONSTRUCTOR"). Mantemos os nomes antigos
@@ -465,7 +485,7 @@ async def fetch_vessel_position_async(mmsi: str) -> Optional[Dict[str, Any]]:
     position = None
     if all_vessels:
         raw_match = next(
-            (v for v in all_vessels if str(v.get("mmsi") or "").strip() == mmsi),
+            (v for v in all_vessels if _mmsi_to_str(v.get("mmsi")) == mmsi),
             None,
         )
         if raw_match:
