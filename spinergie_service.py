@@ -283,9 +283,27 @@ def _parse_spinergie_response(response: httpx.Response, identificador: str) -> O
         data = response.json()
         logger.debug(f"Resposta bruta da Spinergie para {identificador}: {data}")
         if isinstance(data, list):
+            # Log em nível INFO (não DEBUG) propositalmente: isso é essencial
+            # para diagnosticar em produção se a Spinergie está retornando a
+            # lista vazia, ou uma lista sem os MMSIs esperados (ex.: projeto
+            # errado associado à API key), já que uma resposta 200 "vazia"
+            # não gera nenhum erro HTTP e passaria despercebida sem este log.
+            mmsis_retornados = [v.get("mmsi") for v in data if isinstance(v, dict)]
+            logger.info(
+                f"Spinergie retornou {len(data)} embarcação(ões) para {identificador}. "
+                f"MMSIs presentes na resposta: {mmsis_retornados}"
+            )
             return data
         if isinstance(data, dict):
+            logger.info(
+                f"Spinergie retornou um objeto único (não uma lista) para "
+                f"{identificador}. Chaves do objeto: {list(data.keys())}"
+            )
             return [data]
+        logger.warning(
+            f"Formato de resposta inesperado da Spinergie para {identificador}: "
+            f"tipo {type(data).__name__} (esperava list ou dict)."
+        )
         return None
 
     if response.status_code == 401:

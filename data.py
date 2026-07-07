@@ -116,7 +116,7 @@ _VESSELS: List[UnidadeMaritima] = [
     ),
     UnidadeMaritima(
         nome="MAERSK VEGA",
-        imo=None,
+        imo="9294082",
         mmsi="710001720",
         tipoUnidade="EMBARCACAO_APOIO",
         licencasAutorizadas=["LO1572/2020"],
