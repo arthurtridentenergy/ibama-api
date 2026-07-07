@@ -288,10 +288,13 @@ def _parse_spinergie_response(response: httpx.Response, identificador: str) -> O
             # lista vazia, ou uma lista sem os MMSIs esperados (ex.: projeto
             # errado associado à API key), já que uma resposta 200 "vazia"
             # não gera nenhum erro HTTP e passaria despercebida sem este log.
-            mmsis_retornados = [v.get("mmsi") for v in data if isinstance(v, dict)]
+            resumo = [
+                f"{v.get('vesselTitle')} (mmsi={v.get('mmsi')})"
+                for v in data
+                if isinstance(v, dict)
+            ]
             logger.info(
-                f"Spinergie retornou {len(data)} embarcação(ões) para {identificador}. "
-                f"MMSIs presentes na resposta: {mmsis_retornados}"
+                f"Spinergie retornou {len(data)} embarcação(ões) para {identificador}: {resumo}"
             )
             return data
         if isinstance(data, dict):
