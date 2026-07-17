@@ -98,14 +98,17 @@ _VESSELS: List[UnidadeMaritima] = [
         status_licenca="Renovação solicitada",
         observacao_licenca="Aguardando manifestação do IBAMA",
     ),
-    # --- Embarcações de Apoio ---
+    # --- Embarcações de Apoio e Emergência ---
+    # Reclassificadas de EMBARCACAO_APOIO para EMBARCACAO_EMERGENCIA_APOIO a
+    # pedido do IBAMA: "Embarcação que faz atividades de apoio e atividades
+    # de emergência."
     # IMO 9294094 confirmado via cruzamento de MMSI no VesselFinder (verificar
     # novamente contra Equasis/MarineTraffic antes do envio final ao IBAMA).
     UnidadeMaritima(
         nome="MAERSK VENTURA",
         imo="9294094",
         mmsi="710002450",
-        tipoUnidade="EMBARCACAO_APOIO",
+        tipoUnidade="EMBARCACAO_EMERGENCIA_APOIO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2024-01-01T00:00:00Z",
         disponibilidadeFim=None,
@@ -118,7 +121,7 @@ _VESSELS: List[UnidadeMaritima] = [
         nome="MAERSK VEGA",
         imo="9294082",
         mmsi="710001720",
-        tipoUnidade="EMBARCACAO_APOIO",
+        tipoUnidade="EMBARCACAO_EMERGENCIA_APOIO",
         licencasAutorizadas=["LO1572/2020"],
         disponibilidadeInicio="2024-01-01T00:00:00Z",
         disponibilidadeFim=None,

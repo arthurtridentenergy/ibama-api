@@ -94,7 +94,13 @@ class UnidadeResponse(BaseModel):
         examples=["538003593"],
     )
     tipoUnidade: str = Field(
-        ..., description="Categoria da unidade", examples=["UNIDADE_PRODUCAO"]
+        ...,
+        description=(
+            "Categoria da unidade (um dos 8 valores oficiais do IBAMA). "
+            "EMBARCACAO_EMERGENCIA_APOIO: Embarcação que faz atividades de "
+            "apoio e atividades de emergência."
+        ),
+        examples=["UNIDADE_PRODUCAO", "EMBARCACAO_EMERGENCIA_APOIO"],
     )
     licencasAutorizadas: List[str] = Field(
         default_factory=list,
